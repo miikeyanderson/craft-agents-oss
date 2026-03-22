@@ -1,12 +1,26 @@
-import { RPC_CHANNELS, type BrowserPaneCreateOptions, type BrowserEmptyStateLaunchPayload } from '../../shared/types'
+import { Menu } from 'electron'
+import {
+  RPC_CHANNELS,
+  type BrowserContextMenuItemDescriptor,
+  type BrowserPaneCreateOptions,
+  type BrowserEmptyStateLaunchPayload,
+} from '../../shared/types'
 import type { BrowserScreenshotOptions } from '../browser-pane-manager'
 import { pushTyped, type RpcServer } from '@craft-agent/server-core/transport'
+import type { RequestContext } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from './handler-deps'
 
 export const HANDLED_CHANNELS = [
   RPC_CHANNELS.browserPane.CREATE,
   RPC_CHANNELS.browserPane.DESTROY,
   RPC_CHANNELS.browserPane.LIST,
+  RPC_CHANNELS.browserPane.UPDATE_THEME,
+  RPC_CHANNELS.browserPane.SHOW_CONTEXT_MENU,
+  RPC_CHANNELS.browserPane.ATTACH_TO_WINDOW,
+  RPC_CHANNELS.browserPane.DETACH_FROM_WINDOW,
+  RPC_CHANNELS.browserPane.SET_INLINE_BOUNDS,
+  RPC_CHANNELS.browserPane.SET_RENDERER_OVERLAY_ACTIVE,
+  RPC_CHANNELS.browserPane.GET_DISPLAY_MODE,
   RPC_CHANNELS.browserPane.NAVIGATE,
   RPC_CHANNELS.browserPane.GO_BACK,
   RPC_CHANNELS.browserPane.GO_FORWARD,
@@ -24,19 +38,47 @@ export const HANDLED_CHANNELS = [
 ] as const
 
 export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): void {
-  const { browserPaneManager, platform } = deps
+  const { browserPaneManager, platform, windowManager } = deps
   if (!browserPaneManager) return
 
-  server.handle(RPC_CHANNELS.browserPane.CREATE, (_ctx, input?: string | BrowserPaneCreateOptions) => {
+  const resolveWorkspaceId = (ctx: RequestContext): string | null => (
+    ctx.workspaceId
+    ?? (ctx.webContentsId != null ? windowManager?.getWorkspaceForWindow(ctx.webContentsId) ?? null : null)
+  )
+
+  const resolveInstanceId = (preferredId?: string, workspaceId?: string | null): string | null => {
+    if (preferredId) {
+      return preferredId
+    }
+
+    const instances = browserPaneManager.listInstances()
+    const visibleInstances = workspaceId
+      ? instances.filter((instance) => instance.workspaceId === workspaceId)
+      : instances
+
+    return visibleInstances.find((instance) => instance.isVisible)?.id
+      ?? visibleInstances[0]?.id
+      ?? null
+  }
+
+  server.handle(RPC_CHANNELS.browserPane.CREATE, (ctx, input?: string | BrowserPaneCreateOptions) => {
+    const workspaceId = resolveWorkspaceId(ctx)
+
     if (typeof input === 'string') {
-      return browserPaneManager.createInstance(input)
+      return browserPaneManager.createInstance(input, { workspaceId })
     }
 
     if (input?.bindToSessionId) {
-      return browserPaneManager.createForSession(input.bindToSessionId, { show: input.show ?? false })
+      return browserPaneManager.createForSession(input.bindToSessionId, {
+        show: input.show ?? false,
+        workspaceId,
+      })
     }
 
-    return browserPaneManager.createInstance(input?.id, { show: input?.show })
+    return browserPaneManager.createInstance(input?.id, {
+      show: input?.show,
+      workspaceId,
+    })
   })
 
   server.handle(RPC_CHANNELS.browserPane.DESTROY, (_ctx, id: string) => {
@@ -45,6 +87,91 @@ export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): v
 
   server.handle(RPC_CHANNELS.browserPane.LIST, () => {
     return browserPaneManager.listInstances()
+  })
+
+  server.handle(RPC_CHANNELS.browserPane.UPDATE_THEME, async (_ctx, themeCSS: string, isDark: boolean, backgroundImage?: string | null) => {
+    await browserPaneManager.injectThemeCSS(themeCSS, isDark, backgroundImage ?? null)
+  })
+
+  server.handle(
+    RPC_CHANNELS.browserPane.SHOW_CONTEXT_MENU,
+    async (ctx, instanceId: string, items: BrowserContextMenuItemDescriptor[]) => {
+      const hostWindow = ctx.webContentsId != null
+        ? windowManager?.getWindowByWebContentsId(ctx.webContentsId) ?? null
+        : windowManager?.getFocusedWindow() ?? windowManager?.getLastActiveWindow() ?? null
+
+      if (!hostWindow || hostWindow.isDestroyed()) {
+        platform.logger.warn(`[browser-pane] show-context-menu missing host window for ${instanceId}`)
+        return null
+      }
+
+      let resolveSelection: ((value: string | null) => void) | null = null
+      let settled = false
+      const finish = (value: string | null) => {
+        if (settled) return
+        settled = true
+        resolveSelection?.(value)
+      }
+
+      const template = items.map((item): Electron.MenuItemConstructorOptions => {
+        if (item.type === 'separator') {
+          return { type: 'separator' }
+        }
+
+        const itemId = item.id
+        return {
+          type: 'normal',
+          label: item.label ?? '',
+          enabled: item.enabled ?? true,
+          click: () => finish(itemId ?? null),
+        }
+      })
+
+      const menu = Menu.buildFromTemplate(template)
+
+      return await new Promise<string | null>((resolve) => {
+        resolveSelection = resolve
+        menu.popup({
+          window: hostWindow,
+          callback: () => finish(null),
+        })
+      })
+    }
+  )
+
+  server.handle(RPC_CHANNELS.browserPane.ATTACH_TO_WINDOW, (ctx, id?: string) => {
+    const resolvedId = resolveInstanceId(id, resolveWorkspaceId(ctx))
+    if (!resolvedId) return
+    browserPaneManager.attachToWindow(resolvedId, ctx.webContentsId ?? undefined)
+  })
+
+  server.handle(RPC_CHANNELS.browserPane.DETACH_FROM_WINDOW, (ctx, id?: string) => {
+    const resolvedId = resolveInstanceId(id, resolveWorkspaceId(ctx))
+    if (!resolvedId) return
+    browserPaneManager.detachFromWindow(resolvedId)
+  })
+
+  server.handle(
+    RPC_CHANNELS.browserPane.SET_INLINE_BOUNDS,
+    (ctx, bounds: { x: number; y: number; width: number; height: number }, id?: string) => {
+      const resolvedId = resolveInstanceId(id, resolveWorkspaceId(ctx))
+      if (!resolvedId) return
+      browserPaneManager.setInlineBounds(resolvedId, bounds)
+    }
+  )
+
+  server.handle(
+    RPC_CHANNELS.browserPane.SET_RENDERER_OVERLAY_ACTIVE,
+    (ctx, active: boolean, id?: string) => {
+      const resolvedId = resolveInstanceId(id, resolveWorkspaceId(ctx))
+      if (!resolvedId) return
+      browserPaneManager.setRendererOverlayActive(resolvedId, active)
+    }
+  )
+
+  server.handle(RPC_CHANNELS.browserPane.GET_DISPLAY_MODE, (ctx, id?: string) => {
+    const resolvedId = resolveInstanceId(id, resolveWorkspaceId(ctx))
+    return resolvedId ? browserPaneManager.getDisplayMode(resolvedId) : 'popup'
   })
 
   server.handle(RPC_CHANNELS.browserPane.NAVIGATE, async (_ctx, id: string, url: string) => {
@@ -170,6 +297,10 @@ export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): v
   // Forward browser state changes to all windows
   browserPaneManager.onStateChange((info) => {
     pushTyped(server, RPC_CHANNELS.browserPane.STATE_CHANGED, { to: 'all' }, info)
+  })
+
+  browserPaneManager.onDisplayModeChange((mode) => {
+    pushTyped(server, RPC_CHANNELS.browserPane.DISPLAY_MODE_CHANGED, { to: 'all' }, mode)
   })
 
   // Forward browser removals so renderer can immediately drop stale tabs

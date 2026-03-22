@@ -295,6 +295,10 @@ if (!gotTheLock) {
 async function createInitialWindows(): Promise<void> {
   if (!windowManager) return
 
+  const registerMainWindow = (win: BrowserWindow): void => {
+    browserPaneManager?.setMainWindow(win)
+  }
+
   // Load saved window state
   const savedState = loadWindowState()
   let workspaces = getWorkspaces()
@@ -328,6 +332,7 @@ async function createInitialWindows(): Promise<void> {
         focused: saved.focused,
         restoreUrl: saved.url,
       })
+      registerMainWindow(win)
       win.setBounds(saved.bounds)
 
       restoredCount++
@@ -340,7 +345,7 @@ async function createInitialWindows(): Promise<void> {
   }
 
   // Default: open window for first workspace
-  windowManager.createWindow({ workspaceId: workspaces[0].id })
+  registerMainWindow(windowManager.createWindow({ workspaceId: workspaces[0].id }))
   mainLog.info(`Created window for first workspace: ${workspaces[0].name}`)
 }
 
@@ -804,9 +809,9 @@ app.whenReady().then(async () => {
         const wsId = savedState?.lastFocusedWorkspaceId || workspaces[0].id
         // Verify workspace still exists
         if (workspaces.some(ws => ws.id === wsId)) {
-          windowManager.createWindow({ workspaceId: wsId })
+          browserPaneManager?.setMainWindow(windowManager.createWindow({ workspaceId: wsId }))
         } else {
-          windowManager.createWindow({ workspaceId: workspaces[0].id })
+          browserPaneManager?.setMainWindow(windowManager.createWindow({ workspaceId: workspaces[0].id }))
         }
       }
     }

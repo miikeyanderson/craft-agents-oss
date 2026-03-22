@@ -21,6 +21,7 @@ export interface BrowserInstanceSnapshot {
   isVisible: boolean
   title: string
   currentUrl: string
+  displayMode: 'popup' | 'inline'
 }
 
 export interface BrowserScreenshotOptions {
@@ -161,13 +162,16 @@ export interface IBrowserPaneManager {
   // -- Instance management -------------------------------------------------
 
   /** Create a browser instance for a session (optionally shown) */
-  createForSession(sessionId: string, options?: { show?: boolean }): string
+  createForSession(sessionId: string, options?: { show?: boolean; workspaceId?: string }): string
 
   /** Get instance info by ID */
   getInstance(id: string): BrowserInstanceSnapshot | undefined
 
   /** List all browser instances with their public info */
   listInstances(): BrowserInstanceInfo[]
+
+  /** Push CSS custom properties and mode class into browser pane views */
+  injectThemeCSS(themeCSS: string, isDark: boolean, backgroundImage?: string | null): Promise<void>
 
   /** Focus the bound browser instance for a session, creating if needed */
   focusBoundForSession(sessionId: string): string
@@ -183,6 +187,12 @@ export interface IBrowserPaneManager {
 
   /** Hide a browser instance window */
   hide(id: string): void
+
+  /** Hide all inline browser instances for a workspace (on workspace switch) */
+  hideInstancesForWorkspace(workspaceId: string): void
+
+  /** Re-show inline browser instances for a workspace (on workspace switch) */
+  showInstancesForWorkspace(workspaceId: string, hostWindow: unknown): void
 
   /** Clear agent control overlay for all instances in a session */
   clearAgentControl(sessionId: string): void

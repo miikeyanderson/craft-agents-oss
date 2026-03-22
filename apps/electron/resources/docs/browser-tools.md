@@ -9,6 +9,19 @@ Use `browser_tool` to control built-in browser windows (Chromium) inside Craft A
 1. **Primary and only in-session tool surface:** `browser_tool`
 2. **Secondary helper CLI:** `bun run browser-tool --help` for command discovery/templates, and `bun run browser-tool parse-url <url>` for safe URL diagnostics outside agent turns
 
+## Inline Browser Mode
+
+The browser may be docked inline as a panel in the main window (visible alongside sessions).
+When the browser is inline:
+
+- **The user can already see the browser.** You do not need `open --foreground` — the browser content is visible in real-time as you navigate and interact.
+- **`open` still works** — it ensures a browser instance exists and is bound to your session. Use it as the first command, but `--foreground` is unnecessary.
+- **`focus` is a no-op** — the browser is already visible in the inline panel.
+- **`release` and `hide` behave differently** — they dismiss the inline panel rather than hiding a popup window.
+- **The tool response tells you the display mode** — check the `displayMode` field (`'inline'` or `'popup'`) to know whether the user can see browser activity.
+
+When the browser is in popup mode (separate window), the existing workflow applies unchanged.
+
 ---
 
 ## Browser as an Alternative to Source Setup

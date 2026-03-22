@@ -123,6 +123,7 @@ import SettingsNavigator from "@/pages/settings/SettingsNavigator"
 import {
   PANEL_GAP,
   PANEL_EDGE_INSET,
+  PANEL_MIN_WIDTH,
   PANEL_SASH_HALF_HIT_WIDTH,
   PANEL_SASH_HIT_WIDTH,
   PANEL_SASH_LINE_WIDTH,
@@ -133,6 +134,12 @@ import {
 import { hasOpenOverlay } from "@/lib/overlay-detection"
 import { clearSourceIconCaches } from "@/lib/icon-cache"
 import { dispatchFocusInputEvent } from "./input/focus-input-events"
+import {
+  activeBrowserInstanceIdAtom,
+  browserDisplayModeAtom,
+  browserInstanceCountAtom,
+  setBrowserInstancesAtom,
+} from "@/atoms/browser-pane"
 
 /**
  * AppShellProps - Minimal props interface for AppShell component
@@ -525,11 +532,14 @@ function AppShellContent({
     return storage.get(storage.KEYS.sidebarVisible, !defaultCollapsed)
   })
   const [sidebarWidth, setSidebarWidth] = React.useState(() => {
-    return storage.get(storage.KEYS.sidebarWidth, 220)
+    return storage.get(storage.KEYS.sidebarWidth, 280)
   })
   // Session list width in pixels (min 240, max 480)
   const [sessionListWidth, setSessionListWidth] = React.useState(() => {
     return storage.get(storage.KEYS.sessionListWidth, 300)
+  })
+  const [browserInlineWidth, setBrowserInlineWidth] = React.useState(() => {
+    return storage.get(storage.KEYS.browserInlineWidth, 520)
   })
 
   // Hides both sidebar and navigator (CMD+. toggle)
@@ -553,11 +563,13 @@ function AppShellContent({
     })
   }, [])
 
-  const [isResizing, setIsResizing] = React.useState<'sidebar' | 'session-list' | null>(null)
+  const [isResizing, setIsResizing] = React.useState<'sidebar' | 'session-list' | 'browser-inline' | null>(null)
   const [sidebarHandleY, setSidebarHandleY] = React.useState<number | null>(null)
   const [sessionListHandleY, setSessionListHandleY] = React.useState<number | null>(null)
+  const [browserHandleY, setBrowserHandleY] = React.useState<number | null>(null)
   const resizeHandleRef = React.useRef<HTMLDivElement>(null)
   const sessionListHandleRef = React.useRef<HTMLDivElement>(null)
+  const browserHandleRef = React.useRef<HTMLDivElement>(null)
   const [session, setSession] = useSession()
   const { resolvedMode, isDark, setMode } = useTheme()
   const { canGoBack, canGoForward, goBack, goForward, navigateToSource, navigateToSession } = useNavigation()
@@ -570,9 +582,15 @@ function AppShellContent({
   const navState = useNavigationState()
 
   const store = useStore()
+  const setBrowserInstances = useSetAtom(setBrowserInstancesAtom)
+  const setActiveBrowserInstanceId = useSetAtom(activeBrowserInstanceIdAtom)
+  const setBrowserDisplayMode = useSetAtom(browserDisplayModeAtom)
+  const browserDisplayMode = useAtomValue(browserDisplayModeAtom)
+  const browserInstanceCount = useAtomValue(browserInstanceCountAtom)
   const panelStack = useAtomValue(panelStackAtom)
   const panelCount = useAtomValue(panelCountAtom)
   const focusedSessionId = useAtomValue(focusedSessionIdAtom)
+  const isBrowserInline = browserDisplayMode === 'inline' && browserInstanceCount > 0
 
   // Navigate the focused panel to a session.
   // If the session is already open in another panel, focus that panel instead.
@@ -863,10 +881,36 @@ function AppShellContent({
 
       const newCollapsedItems = storage.get<string[] | null>(storage.KEYS.collapsedSidebarItems, null, activeWorkspaceId)
       setCollapsedItems(newCollapsedItems !== null ? new Set(newCollapsedItems) : new Set(['nav:labels']))
+
+      void window.electronAPI.browserPane.list()
+        .then((instances) => {
+          const scopedInstances = instances.filter((instance) => instance.workspaceId === activeWorkspaceId)
+          setBrowserInstances(scopedInstances)
+          setActiveBrowserInstanceId(null)
+          if (scopedInstances.length === 0) {
+            setBrowserDisplayMode('popup')
+            return
+          }
+
+          return window.electronAPI.browserPane.getDisplayMode()
+            .then((mode) => {
+              setBrowserDisplayMode(mode)
+            })
+            .catch((error) => {
+              console.warn('[AppShell] Failed to refresh browser display mode for workspace switch:', error)
+              setBrowserDisplayMode('popup')
+            })
+        })
+        .catch((error) => {
+          console.warn('[AppShell] Failed to refresh browser instances for workspace switch:', error)
+          setBrowserInstances([])
+          setActiveBrowserInstanceId(null)
+          setBrowserDisplayMode('popup')
+        })
     }
 
     previousWorkspaceRef.current = activeWorkspaceId
-  }, [activeWorkspaceId])
+  }, [activeWorkspaceId, setActiveBrowserInstanceId, setBrowserDisplayMode, setBrowserInstances])
 
   // Load sources from backend on mount
   React.useEffect(() => {
@@ -1213,7 +1257,7 @@ function AppShellContent({
 
     const handleMouseMove = (e: MouseEvent) => {
       if (isResizing === 'sidebar') {
-        const newWidth = Math.min(Math.max(e.clientX, 180), 320)
+        const newWidth = Math.min(Math.max(e.clientX, 180), 400)
         setSidebarWidth(newWidth)
         if (resizeHandleRef.current) {
           const rect = resizeHandleRef.current.getBoundingClientRect()
@@ -1227,6 +1271,14 @@ function AppShellContent({
           const rect = sessionListHandleRef.current.getBoundingClientRect()
           setSessionListHandleY(e.clientY - rect.top)
         }
+      } else if (isResizing === 'browser-inline') {
+        const containerRight = window.innerWidth - PANEL_EDGE_INSET
+        const newWidth = Math.min(Math.max(containerRight - e.clientX, PANEL_MIN_WIDTH), 800)
+        setBrowserInlineWidth(newWidth)
+        if (browserHandleRef.current) {
+          const rect = browserHandleRef.current.getBoundingClientRect()
+          setBrowserHandleY(e.clientY - rect.top)
+        }
       }
     }
 
@@ -1237,6 +1289,9 @@ function AppShellContent({
       } else if (isResizing === 'session-list') {
         storage.set(storage.KEYS.sessionListWidth, sessionListWidth)
         setSessionListHandleY(null)
+      } else if (isResizing === 'browser-inline') {
+        storage.set(storage.KEYS.browserInlineWidth, browserInlineWidth)
+        setBrowserHandleY(null)
       }
       setIsResizing(null)
     }
@@ -1252,6 +1307,7 @@ function AppShellContent({
     isResizing,
     sidebarWidth,
     sessionListWidth,
+    browserInlineWidth,
     isSidebarVisible,
   ])
 
@@ -1865,8 +1921,29 @@ function AppShellContent({
       })
       await window.electronAPI.browserPane.focus(instanceId)
     } catch (error) {
+      const errorDetail = error instanceof Error
+        ? `${error.message}\n\n${error.stack ?? ''}`
+        : String(error)
       console.error('[Chat] Failed to create browser window:', error)
-      toast.error('Failed to create browser window')
+      toast.error('Failed to create browser window', {
+        description: (
+          <div className="mt-1 flex flex-col gap-2">
+            <pre className="max-h-[200px] overflow-auto whitespace-pre-wrap break-all rounded bg-black/10 p-2 text-[11px] font-mono dark:bg-white/10">
+              {errorDetail}
+            </pre>
+            <button
+              className="self-start rounded bg-white/20 px-2 py-1 text-[11px] font-medium hover:bg-white/30 dark:bg-white/10 dark:hover:bg-white/20"
+              onClick={() => {
+                navigator.clipboard.writeText(errorDetail)
+                toast.success('Copied to clipboard')
+              }}
+            >
+              Copy error
+            </button>
+          </div>
+        ),
+        duration: 30000,
+      })
     }
   }, [])
 
@@ -2094,6 +2171,58 @@ function AppShellContent({
     }
   }, [navState, sessionFilter, effectiveSessionStatuses, labelConfigs, viewConfigs, automationFilter])
 
+  const renderSessionList = () => (
+    <SessionList
+      key={sessionFilter?.kind}
+      items={searchActive ? workspaceSessionMetas : filteredSessionMetas}
+      onDelete={handleDeleteSession}
+      onFlag={onFlagSession}
+      onUnflag={onUnflagSession}
+      onArchive={onArchiveSession}
+      onUnarchive={onUnarchiveSession}
+      onMarkUnread={onMarkSessionUnread}
+      onSessionStatusChange={onSessionStatusChange}
+      onRename={onRenameSession}
+      onFocusChatInput={(targetSessionId) => {
+        focusChatInputForSession(targetSessionId ?? focusedSessionId ?? session.selected)
+      }}
+      onSessionSelect={(selectedMeta) => {
+        navigateToSession(selectedMeta.id)
+      }}
+      onOpenInNewWindow={(selectedMeta) => {
+        if (activeWorkspaceId) {
+          window.electronAPI.openSessionInNewWindow(activeWorkspaceId, selectedMeta.id)
+        }
+      }}
+      onNavigateToView={(view) => {
+        if (view === 'allSessions') {
+          navigate(routes.view.allSessions())
+        } else if (view === 'flagged') {
+          navigate(routes.view.flagged())
+        }
+      }}
+      sessionOptions={sessionOptions}
+      searchActive={searchActive}
+      searchQuery={searchQuery}
+      onSearchChange={setSearchQuery}
+      onSearchClose={() => {
+        setSearchActive(false)
+        setSearchQuery('')
+      }}
+      sessionStatuses={effectiveSessionStatuses}
+      evaluateViews={evaluateViews}
+      labels={labelConfigs}
+      onLabelsChange={handleSessionLabelsChange}
+      groupingMode={chatGroupingMode}
+      workspaceId={activeWorkspaceId ?? undefined}
+      statusFilter={listFilter}
+      labelFilterMap={labelFilter}
+      focusedSessionId={panelCount === 0 ? null : panelCount > 1 ? focusedSessionId : undefined}
+      onNavigateToSession={panelCount > 1 ? navigateToSessionInPanel : undefined}
+      hasPendingPrompt={hasPendingPrompt}
+    />
+  )
+
   // Build recursive sidebar items from label tree.
   // Each node renders with condensed height (compact: true) since many labels expected.
   // Clicking any label navigates to its filter view; the chevron toggles expand/collapse.
@@ -2188,6 +2317,10 @@ function AppShellContent({
         style={{ height: '100%', paddingRight: PANEL_EDGE_INSET, paddingBottom: PANEL_EDGE_INSET, paddingLeft: 0, gap: PANEL_GAP }}
       >
         <PanelStackContainer
+          activeWorkspaceId={activeWorkspaceId}
+          onAddSessionPanel={() => handleNewChat(true)}
+          onAddBrowserPanel={() => { void handleNewBrowserWindow() }}
+          browserInlineWidth={isBrowserInline ? browserInlineWidth : 0}
           sidebarSlot={
             <div
               ref={sidebarRef}
@@ -2229,8 +2362,8 @@ function AppShellContent({
                   </Tooltip>
                 </div>
                 {/* Primary Nav: All Sessions (▸ Statuses, Flagged, Archived), Labels | Sources, Skills | Settings */}
-                {/* pb-4 provides clearance so the last item scrolls above the mask-fade-bottom gradient */}
-                <div className="flex-1 overflow-y-auto min-h-0 mask-fade-bottom pb-4">
+                <div className="flex-1 flex flex-col min-h-0">
+                <div className="shrink-0">
                 <LeftSidebar
                   isCollapsed={false}
                   getItemProps={getSidebarItemProps}
@@ -2467,8 +2600,12 @@ function AppShellContent({
                     },
                   ]}
                 />
-                {/* Agent Tree: Hierarchical list of agents */}
-                {/* Agents section removed */}
+                </div>
+                {isSessionsNavigation(navState) && (
+                  <div className="flex-1 min-h-0 overflow-hidden px-1">
+                    {renderSessionList()}
+                  </div>
+                )}
                 </div>
               </div>
 
@@ -3154,60 +3291,12 @@ function AppShellContent({
               <>
                 {/* SessionList: Scrollable list of session cards */}
                 {/* Key on sidebarMode forces full remount when switching views, skipping animations */}
-                <SessionList
-                  key={sessionFilter?.kind}
-                  items={searchActive ? workspaceSessionMetas : filteredSessionMetas}
-                  onDelete={handleDeleteSession}
-                  onFlag={onFlagSession}
-                  onUnflag={onUnflagSession}
-                  onArchive={onArchiveSession}
-                  onUnarchive={onUnarchiveSession}
-                  onMarkUnread={onMarkSessionUnread}
-                  onSessionStatusChange={onSessionStatusChange}
-                  onRename={onRenameSession}
-                  onFocusChatInput={(targetSessionId) => {
-                    focusChatInputForSession(targetSessionId ?? focusedSessionId ?? session.selected)
-                  }}
-                  onSessionSelect={(selectedMeta) => {
-                    navigateToSession(selectedMeta.id)
-                  }}
-                  onOpenInNewWindow={(selectedMeta) => {
-                    if (activeWorkspaceId) {
-                      window.electronAPI.openSessionInNewWindow(activeWorkspaceId, selectedMeta.id)
-                    }
-                  }}
-                  onNavigateToView={(view) => {
-                    if (view === 'allSessions') {
-                      navigate(routes.view.allSessions())
-                    } else if (view === 'flagged') {
-                      navigate(routes.view.flagged())
-                    }
-                  }}
-                  sessionOptions={sessionOptions}
-                  searchActive={searchActive}
-                  searchQuery={searchQuery}
-                  onSearchChange={setSearchQuery}
-                  onSearchClose={() => {
-                    setSearchActive(false)
-                    setSearchQuery('')
-                  }}
-                  sessionStatuses={effectiveSessionStatuses}
-                  evaluateViews={evaluateViews}
-                  labels={labelConfigs}
-                  onLabelsChange={handleSessionLabelsChange}
-                  groupingMode={chatGroupingMode}
-                  workspaceId={activeWorkspaceId ?? undefined}
-                  statusFilter={listFilter}
-                  labelFilterMap={labelFilter}
-                  focusedSessionId={panelCount === 0 ? null : panelCount > 1 ? focusedSessionId : undefined}
-                  onNavigateToSession={panelCount > 1 ? navigateToSessionInPanel : undefined}
-                  hasPendingPrompt={hasPendingPrompt}
-                />
+                {renderSessionList()}
               </>
             )}
             </div>
           }
-          navigatorWidth={effectiveSidebarAndNavigatorHidden ? 0 : sessionListWidth}
+          navigatorWidth={effectiveSidebarAndNavigatorHidden || isSessionsNavigation(navState) ? 0 : sessionListWidth}
           isSidebarAndNavigatorHidden={effectiveSidebarAndNavigatorHidden}
           isRightSidebarVisible={false}
           isResizing={!!isResizing}
@@ -3247,7 +3336,7 @@ function AppShellContent({
         )}
 
         {/* Session List Resize Handle (absolute, hidden in focused mode) */}
-        {!effectiveSidebarAndNavigatorHidden && (
+        {!effectiveSidebarAndNavigatorHidden && !isSessionsNavigation(navState) && (
         <div
           ref={sessionListHandleRef}
           onMouseDown={(e) => { e.preventDefault(); setIsResizing('session-list') }}
@@ -3275,6 +3364,37 @@ function AppShellContent({
             className="h-full"
             style={{
               ...getResizeGradientStyle(sessionListHandleY, sessionListHandleRef.current?.clientHeight ?? null),
+              width: PANEL_SASH_LINE_WIDTH,
+            }}
+          />
+        </div>
+        )}
+
+        {/* Browser Inline Resize Handle */}
+        {isBrowserInline && (
+        <div
+          ref={browserHandleRef}
+          onMouseDown={(e) => { e.preventDefault(); setIsResizing('browser-inline') }}
+          onMouseMove={(e) => {
+            if (browserHandleRef.current) {
+              const rect = browserHandleRef.current.getBoundingClientRect()
+              setBrowserHandleY(e.clientY - rect.top)
+            }
+          }}
+          onMouseLeave={() => { if (isResizing !== 'browser-inline') setBrowserHandleY(null) }}
+          className="absolute cursor-col-resize z-panel flex justify-center"
+          style={{
+            width: PANEL_SASH_HIT_WIDTH,
+            top: PANEL_STACK_VERTICAL_OVERFLOW,
+            bottom: PANEL_STACK_VERTICAL_OVERFLOW,
+            right: browserInlineWidth + (PANEL_GAP / 2) - PANEL_SASH_HALF_HIT_WIDTH,
+            transition: isResizing === 'browser-inline' ? undefined : 'right 0.15s ease-out',
+          }}
+        >
+          <div
+            className="h-full"
+            style={{
+              ...getResizeGradientStyle(browserHandleY, browserHandleRef.current?.clientHeight ?? null),
               width: PANEL_SASH_LINE_WIDTH,
             }}
           />

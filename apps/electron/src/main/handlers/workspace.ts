@@ -125,6 +125,16 @@ export function registerWorkspaceCoreHandlers(server: RpcServer, deps: HandlerDe
           sessionManager.clearActiveViewingSession(oldWorkspaceId)
         }
       }
+
+      deps.platform.logger.info(`[browser-pane-switch] oldWorkspaceId=${oldWorkspaceId} newWorkspaceId=${workspaceId} hasBPM=${!!deps.browserPaneManager}`)
+      if (oldWorkspaceId && oldWorkspaceId !== workspaceId) {
+        deps.browserPaneManager?.hideInstancesForWorkspace(oldWorkspaceId)
+      }
+
+      const win = windowManager.getWindowByWebContentsId(wcId)
+      if (win) {
+        deps.browserPaneManager?.showInstancesForWorkspace(workspaceId, win)
+      }
     }
 
     // Set up ConfigWatcher for the new workspace

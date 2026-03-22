@@ -176,6 +176,17 @@ export class WindowManager {
       window.show()
     })
 
+    // Debug: log renderer crashes and close reasons
+    window.webContents.on('render-process-gone', (_event, details) => {
+      windowLog.error(`[CRASH] Renderer process gone: reason=${details.reason} exitCode=${details.exitCode}`)
+    })
+    window.webContents.on('preload-error', (_event, preloadPath, error) => {
+      windowLog.error(`[CRASH] Preload error: path=${preloadPath} error=${error.message}`)
+    })
+    window.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+      windowLog.error(`[CRASH] did-fail-load: code=${errorCode} desc=${errorDescription} url=${validatedURL}`)
+    })
+
     // Open external links in default browser
     window.webContents.setWindowOpenHandler((details) => {
       shell.openExternal(details.url)

@@ -9,13 +9,16 @@ import { describe, it, expect, beforeEach, mock } from 'bun:test'
 
 const createdWindows: any[] = []
 let toolbarLoadFailuresRemaining = 0
+let nextWebContentsId = 1
 const mockShellOpenExternal = mock(async () => {})
 const mockIpcMainHandle = mock(() => {})
 
 function createMockWebContents() {
   const listeners: Record<string, Function[]> = {}
   let currentUrl = 'about:blank'
+  const id = nextWebContentsId++
   return {
+    id,
     userAgent: 'Mock Chrome Electron/99.0.0',
     session: {},
     on: (event: string, cb: Function) => {
@@ -30,7 +33,8 @@ function createMockWebContents() {
         throw new Error('mock toolbar load failure')
       }
     }),
-    loadFile: mock(async (_path: string, _opts?: unknown) => {
+    loadFile: mock(async (path: string, _opts?: unknown) => {
+      currentUrl = path
       if (toolbarLoadFailuresRemaining > 0) {
         toolbarLoadFailuresRemaining--
         throw new Error('mock toolbar load failure')
@@ -38,6 +42,7 @@ function createMockWebContents() {
     }),
     getTitle: mock(() => 'Test Page'),
     getURL: mock(() => currentUrl),
+    isDestroyed: mock(() => false),
     canGoBack: mock(() => false),
     canGoForward: mock(() => false),
     goBack: mock(() => {}),
@@ -68,16 +73,26 @@ function createMockWebContents() {
     },
     _listeners: listeners,
     _emit: (event: string, ...args: any[]) => {
-      for (const cb of listeners[event] || []) cb({}, ...args)
+      for (const cb of listeners[event] || []) {
+        if (event === 'did-create-window') {
+          cb(...args)
+        } else {
+          cb({}, ...args)
+        }
+      }
     },
   }
 }
 
 function createMockBrowserView() {
   const webContents = createMockWebContents()
+  let bounds = { x: 0, y: 0, width: 0, height: 0 }
   return {
     webContents,
-    setBounds: mock(() => {}),
+    setBounds: mock((nextBounds: typeof bounds) => {
+      bounds = nextBounds
+    }),
+    getBounds: mock(() => bounds),
     setAutoResize: mock(() => {}),
   }
 }
@@ -89,6 +104,7 @@ function createMockWindow(opts?: { width?: number; height?: number; minWidth?: n
   let contentHeight = opts?.height ?? 900
   const minWidth = opts?.minWidth ?? 0
   const minHeight = opts?.minHeight ?? 0
+  const browserViews: any[] = []
 
   const win = {
     webContents,
@@ -110,7 +126,9 @@ function createMockWindow(opts?: { width?: number; height?: number; minWidth?: n
     isDestroyed: mock(() => false),
     isMinimized: mock(() => false),
     restore: mock(() => {}),
-    show: mock(() => {}),
+    show: mock(() => {
+      win._emit('show')
+    }),
     showInactive: mock(() => {}),
     setWindowButtonVisibility: mock((_visible: boolean) => {}),
     hide: mock(() => {
@@ -121,7 +139,18 @@ function createMockWindow(opts?: { width?: number; height?: number; minWidth?: n
       win._emit('closed')
     }),
     setBrowserView: mock((_view: any) => {}),
-    addBrowserView: mock((_view: any) => {}),
+    addBrowserView: mock((view: any) => {
+      if (!browserViews.includes(view)) {
+        browserViews.push(view)
+      }
+    }),
+    removeBrowserView: mock((view: any) => {
+      const index = browserViews.indexOf(view)
+      if (index >= 0) {
+        browserViews.splice(index, 1)
+      }
+    }),
+    getBrowserViews: mock(() => [...browserViews]),
     setTopBrowserView: mock((_view: any) => {}),
     getContentSize: mock(() => [contentWidth, contentHeight]),
     setContentSize: mock((width: number, height: number) => {
@@ -161,6 +190,10 @@ mock.module('electron', () => ({
   },
   nativeTheme: {
     shouldUseDarkColors: false,
+  },
+  app: {
+    isPackaged: false,
+    getPath: mock((_name: string) => '/tmp'),
   },
   shell: {
     openExternal: mockShellOpenExternal,
@@ -240,17 +273,19 @@ describe('BrowserPaneManager', () => {
   beforeEach(() => {
     createdWindows.length = 0
     toolbarLoadFailuresRemaining = 0
+    nextWebContentsId = 1
     mockShellOpenExternal.mockClear()
     mockIpcMainHandle.mockClear()
     manager = new BrowserPaneManager()
   })
 
   it('creates and lists instances', () => {
-    const id = manager.createInstance('test-1')
+    const id = manager.createInstance('test-1', { workspaceId: 'ws-1' })
     const list = manager.listInstances()
     expect(id).toBe('test-1')
     expect(list).toHaveLength(1)
     expect(list[0].id).toBe('test-1')
+    expect(list[0].workspaceId).toBe('ws-1')
     expect(list[0].agentControlActive).toBe(false)
   })
 
@@ -314,6 +349,131 @@ describe('BrowserPaneManager', () => {
     manager.createInstance('d1')
     manager.destroyInstance('d1')
     expect(manager.listInstances()).toHaveLength(0)
+  })
+
+  it('attaches and detaches browser views to the main window for inline mode', () => {
+    const mainWindow = createMockWindow({ width: 1400, height: 900 })
+    manager.setMainWindow(mainWindow as any)
+    manager.createInstance('inline-1')
+
+    const instance = (manager as any).instances.get('inline-1')
+    manager.attachToWindow('inline-1')
+
+    expect(instance.displayMode).toBe('inline')
+    expect(instance.window.hide).toHaveBeenCalledTimes(0)
+    expect(mainWindow.addBrowserView).toHaveBeenCalledTimes(3)
+
+    manager.setInlineBounds('inline-1', { x: 10, y: 20, width: 800, height: 600 })
+    expect(instance.toolbarView.setBounds).toHaveBeenCalledWith({ x: 10, y: 20, width: 800, height: 48 })
+    expect(instance.pageView.setBounds).toHaveBeenCalledWith({ x: 10, y: 68, width: 800, height: 552 })
+
+    manager.detachFromWindow('inline-1')
+
+    expect(instance.displayMode).toBe('popup')
+    expect(mainWindow.removeBrowserView).toHaveBeenCalledTimes(3)
+    expect(instance.window.addBrowserView).toHaveBeenCalledTimes(3)
+    expect(instance.window.show).toHaveBeenCalled()
+  })
+
+  it('attaches inline browser views to the calling workspace window', () => {
+    const fallbackWindow = createMockWindow({ width: 1400, height: 900 })
+    const targetWindow = createMockWindow({ width: 1200, height: 800 })
+    manager.setMainWindow(fallbackWindow as any)
+    manager.setWindowManager({
+      getWindowByWebContentsId: (wcId: number) => wcId === targetWindow.webContents.id ? targetWindow as any : null,
+      getFocusedWindow: () => null,
+      getLastActiveWindow: () => fallbackWindow as any,
+    } as any)
+    manager.createInstance('inline-target')
+
+    manager.attachToWindow('inline-target', targetWindow.webContents.id)
+
+    expect(targetWindow.addBrowserView).toHaveBeenCalledTimes(3)
+    expect(fallbackWindow.addBrowserView).toHaveBeenCalledTimes(3)
+  })
+
+  it('reapplies inline bounds when the host window resizes', () => {
+    const mainWindow = createMockWindow({ width: 1400, height: 900 })
+    manager.setMainWindow(mainWindow as any)
+    manager.createInstance('inline-resize')
+
+    const instance = (manager as any).instances.get('inline-resize')
+    manager.attachToWindow('inline-resize')
+    manager.setInlineBounds('inline-resize', { x: 10, y: 20, width: 800, height: 600 })
+    const toolbarCallCountBeforeResize = instance.toolbarView.setBounds.mock.calls.length
+
+    mainWindow._emit('resize')
+
+    expect(instance.toolbarView.setBounds.mock.calls.length).toBe(toolbarCallCountBeforeResize + 1)
+    expect(instance.toolbarView.setBounds).toHaveBeenLastCalledWith({ x: 10, y: 20, width: 800, height: 48 })
+  })
+
+  it('hides and restores inline instances by workspace without destroying them', () => {
+    const hostWindow = createMockWindow({ width: 1400, height: 900 })
+    manager.setMainWindow(hostWindow as any)
+    manager.createInstance('ws-a-inline', { workspaceId: 'ws-a' })
+    manager.createInstance('ws-b-inline', { workspaceId: 'ws-b' })
+
+    const instanceA = (manager as any).instances.get('ws-a-inline')
+    const instanceB = (manager as any).instances.get('ws-b-inline')
+
+    manager.hideInstancesForWorkspace('ws-a')
+
+    expect(hostWindow.removeBrowserView).toHaveBeenCalledTimes(3)
+    expect(instanceA.isVisible).toBe(false)
+    expect(instanceA.inlineHostWindow).toBeNull()
+    expect(instanceB.isVisible).toBe(true)
+
+    manager.showInstancesForWorkspace('ws-a', hostWindow as any)
+
+    expect(hostWindow.addBrowserView).toHaveBeenCalledTimes(9)
+    expect(instanceA.isVisible).toBe(true)
+    expect(instanceA.inlineHostWindow).toBe(hostWindow)
+  })
+
+  it('keeps the popup BrowserWindow hidden when focusing an inline instance', () => {
+    const mainWindow = createMockWindow({ width: 1400, height: 900 })
+    manager.setMainWindow(mainWindow as any)
+    manager.createInstance('inline-focus')
+
+    const instance = (manager as any).instances.get('inline-focus')
+    manager.focus('inline-focus')
+
+    expect(mainWindow.show).toHaveBeenCalledTimes(1)
+    expect(mainWindow.focus).toHaveBeenCalledTimes(1)
+    expect(instance.window.show).toHaveBeenCalledTimes(0)
+    expect(instance.window.focus).toHaveBeenCalledTimes(0)
+  })
+
+  it('keeps the popup BrowserWindow hidden when inline creation waits for toolbar readiness', () => {
+    const mainWindow = createMockWindow({ width: 1400, height: 900 })
+    manager.setMainWindow(mainWindow as any)
+    manager.createInstance('inline-ready', { show: true })
+
+    const instance = (manager as any).instances.get('inline-ready')
+    instance.toolbarView.webContents._emit('did-finish-load')
+
+    expect(instance.toolbarReady).toBe(true)
+    expect(instance.window.show).toHaveBeenCalledTimes(0)
+    expect(instance.window.focus).toHaveBeenCalledTimes(0)
+  })
+
+  it('removes inline browser views from the attached host window on destroy', () => {
+    const fallbackWindow = createMockWindow({ width: 1400, height: 900 })
+    const targetWindow = createMockWindow({ width: 1200, height: 800 })
+    manager.setMainWindow(fallbackWindow as any)
+    manager.setWindowManager({
+      getWindowByWebContentsId: (wcId: number) => wcId === targetWindow.webContents.id ? targetWindow as any : null,
+      getFocusedWindow: () => null,
+      getLastActiveWindow: () => fallbackWindow as any,
+    } as any)
+    manager.createInstance('inline-destroy')
+
+    manager.attachToWindow('inline-destroy', targetWindow.webContents.id)
+    manager.destroyInstance('inline-destroy')
+
+    expect(targetWindow.removeBrowserView).toHaveBeenCalledTimes(3)
+    expect(fallbackWindow.removeBrowserView).toHaveBeenCalledTimes(3)
   })
 
   it('destroys instance via toolbar destroy IPC handler', async () => {
@@ -442,7 +602,7 @@ describe('BrowserPaneManager', () => {
     manager.focus('f1')
 
     const instance = (manager as any).instances.get('f1')
-    instance.window._emit('ready-to-show')
+    instance.toolbarView.webContents._emit('did-finish-load')
 
     expect(instance.window.show).toHaveBeenCalled()
     expect(instance.window.focus).toHaveBeenCalled()
@@ -456,7 +616,7 @@ describe('BrowserPaneManager', () => {
     manager.focus('f2')
 
     const instance = (manager as any).instances.get('f2')
-    instance.window._emit('ready-to-show')
+    instance.toolbarView.webContents._emit('did-finish-load')
 
     expect(instance.window.show.mock.calls.length).toBe(1)
     expect(instance.window.focus.mock.calls.length).toBe(1)
@@ -693,6 +853,22 @@ describe('BrowserPaneManager', () => {
     expect(instance.toolbarReady).toBe(false)
   })
 
+  it('still injects theme state for about:blank did-finish-load before first theme push', async () => {
+    toolbarLoadFailuresRemaining = 20
+    manager.createInstance('toolbar-ignore-about-blank-theme')
+    const instance = (manager as any).instances.get('toolbar-ignore-about-blank-theme')
+
+    ;(manager as any).lastThemeCSS = null
+    ;(manager as any).lastThemeIsDark = true
+    instance.toolbarView.webContents.getURL = mock(() => 'about:blank')
+
+    instance.toolbarView.webContents._emit('did-finish-load')
+    await Bun.sleep(0)
+
+    expect(instance.pageView.webContents.executeJavaScript).toHaveBeenLastCalledWith(expect.stringContaining("classList.add('dark')"))
+    expect(instance.toolbarView.webContents.executeJavaScript).toHaveBeenLastCalledWith(expect.stringContaining("classList.add('dark')"))
+  })
+
   it('marks toolbar ready for fallback data page did-finish-load', () => {
     toolbarLoadFailuresRemaining = 20
     manager.createInstance('toolbar-fallback-ready')
@@ -735,6 +911,50 @@ describe('BrowserPaneManager', () => {
     await Bun.sleep(140)
 
     expect(manager.listInstances().find(i => i.id === 'theme-early')?.themeColor).toBe('#0f1e2d')
+  })
+
+  it('updates native background color for both page and toolbar views when applying theme CSS', async () => {
+    manager.createInstance('theme-native-bg')
+    const instance = (manager as any).instances.get('theme-native-bg')
+
+    instance.pageView.webContents.executeJavaScript = mock(async (expr: string) => {
+      if (expr.includes("document.createElement('div')")) return '#112233'
+      return null
+    })
+    instance.toolbarView.webContents.executeJavaScript = mock(async () => null)
+
+    await manager.injectThemeCSS('--background: rgb(17, 34, 51);', true, null)
+
+    expect(instance.pageView.webContents.setBackgroundColor).toHaveBeenLastCalledWith('#112233')
+    expect(instance.toolbarView.webContents.setBackgroundColor).toHaveBeenLastCalledWith('#112233')
+  })
+
+  it('injects scenic dataset and background image into page and toolbar views', async () => {
+    manager.createInstance('theme-scenic')
+    const instance = (manager as any).instances.get('theme-scenic')
+    const pageScripts: string[] = []
+    const toolbarScripts: string[] = []
+
+    instance.pageView.webContents.executeJavaScript = mock(async (expr: string) => {
+      pageScripts.push(expr)
+      if (expr.includes("document.createElement('div')")) return '#112233'
+      return null
+    })
+    instance.toolbarView.webContents.executeJavaScript = mock(async (expr: string) => {
+      toolbarScripts.push(expr)
+      return null
+    })
+
+    await manager.injectThemeCSS('--background: rgb(17, 34, 51);', true, 'https://example.com/scenic.jpg')
+
+    const pageThemeScript = pageScripts.find((expr) => expr.includes('scenicBackgroundImage'))
+    const toolbarThemeScript = toolbarScripts.find((expr) => expr.includes('scenicBackgroundImage'))
+
+    expect(pageThemeScript).toContain("r.dataset.scenic = 'true'")
+    expect(pageThemeScript).toContain('--background-image')
+    expect(pageThemeScript).toContain('https://example.com/scenic.jpg')
+    expect(toolbarThemeScript).toContain("r.dataset.scenic = 'true'")
+    expect((manager as any).lastBackgroundImage).toBe('https://example.com/scenic.jpg')
   })
 
   it('clears pending in-page theme timer on full navigation', async () => {
@@ -811,6 +1031,46 @@ describe('BrowserPaneManager', () => {
     expect(instance.window.focus).not.toHaveBeenCalled()
     expect(instance.window.hide).toHaveBeenCalled()
     expect(result.metadata?.warnings?.some((w: string) => w.includes('temporary inactive reveal'))).toBe(true)
+  })
+
+  it('does not reveal the hidden popup BrowserWindow during inline screenshot recovery', async () => {
+    const mainWindow = createMockWindow({ width: 1400, height: 900 })
+    manager.setMainWindow(mainWindow as any)
+    manager.createInstance('inline-screenshot')
+
+    const instance = (manager as any).instances.get('inline-screenshot')
+    let captureCalls = 0
+    instance.isVisible = false
+    instance.pageView.webContents.capturePage = mock(async (_rect?: unknown, captureOpts?: { stayHidden?: boolean }) => {
+      captureCalls += 1
+      if (captureOpts?.stayHidden) {
+        return {
+          isEmpty: () => true,
+          getSize: () => ({ width: 0, height: 0 }),
+          resize: function() { return this },
+          toPNG: () => Buffer.alloc(0),
+          toJPEG: () => Buffer.alloc(0),
+        }
+      }
+
+      const img = {
+        isEmpty: () => false,
+        getSize: () => ({ width: 2400, height: 1800 }),
+        resize: () => img,
+        toPNG: () => Buffer.from('inline-png'),
+        toJPEG: (_q: number) => Buffer.from('inline-jpeg'),
+      }
+      return img
+    })
+
+    const result = await manager.screenshot('inline-screenshot', { includeMetadata: true })
+
+    expect(captureCalls).toBeGreaterThan(1)
+    expect(instance.window.showInactive).toHaveBeenCalledTimes(0)
+    expect(instance.window.show).toHaveBeenCalledTimes(0)
+    expect(instance.window.hide).toHaveBeenCalledTimes(0)
+    expect(result.imageBuffer.toString()).toBe('inline-png')
+    expect(result.metadata?.warnings).toBeUndefined()
   })
 
   it('throws when region screenshot capture returns empty NativeImage', async () => {

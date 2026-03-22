@@ -27,14 +27,23 @@ export { PANEL_MIN_WIDTH }
 
 interface PanelResizeSashProps {
   /** Index of the panel to the left of this sash (in panelStack) */
-  leftIndex: number
+  leftIndex?: number
   /** Index of the panel to the right of this sash (in panelStack) */
-  rightIndex: number
+  rightIndex?: number
+  /** Optional controlled proportions for non-panel-stack splits */
+  controlledProportions?: {
+    left: number
+    right: number
+  }
+  /** Optional controlled resize handler for non-panel-stack splits */
+  onResizeProportions?: (next: { left: number; right: number }) => void
 }
 
 export function PanelResizeSash({
   leftIndex,
   rightIndex,
+  controlledProportions,
+  onResizeProportions,
 }: PanelResizeSashProps) {
   const resizePanels = useSetAtom(resizePanelsAtom)
   const panelStack = useAtomValue(panelStackAtom)
@@ -43,12 +52,14 @@ export function PanelResizeSash({
   const startLeftWidthRef = useRef(0)
   const startRightWidthRef = useRef(0)
   const combinedProportionRef = useRef(0)
+  const controlledLeftProportion = controlledProportions?.left
+  const controlledRightProportion = controlledProportions?.right
 
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault()
     handlers.onMouseDown()
 
-    const sashEl = ref.current
+    const sashEl = ref.current?.parentElement ?? null
     if (!sashEl) return
 
     // Measure sibling panel widths from the DOM
@@ -62,8 +73,8 @@ export function PanelResizeSash({
     startLeftWidthRef.current = leftPanel.getBoundingClientRect().width
     startRightWidthRef.current = rightPanel.getBoundingClientRect().width
 
-    const leftProp = panelStack[leftIndex]?.proportion ?? 0.5
-    const rightProp = panelStack[rightIndex]?.proportion ?? 0.5
+    const leftProp = controlledLeftProportion ?? panelStack[leftIndex ?? 0]?.proportion ?? 0.5
+    const rightProp = controlledRightProportion ?? panelStack[rightIndex ?? 0]?.proportion ?? 0.5
     combinedProportionRef.current = leftProp + rightProp
 
     const handleMouseMove = (e: MouseEvent) => {
@@ -89,6 +100,12 @@ export function PanelResizeSash({
       const leftProportion = (newLeftWidth / total) * combined
       const rightProportion = combined - leftProportion
 
+      if (onResizeProportions) {
+        onResizeProportions({ left: leftProportion, right: rightProportion })
+        return
+      }
+
+      if (leftIndex === undefined || rightIndex === undefined) return
       resizePanels({ leftIndex, rightIndex, leftProportion, rightProportion })
     }
 
@@ -103,40 +120,51 @@ export function PanelResizeSash({
     document.body.style.cursor = 'col-resize'
     document.addEventListener('mousemove', handleMouseMove)
     document.addEventListener('mouseup', handleMouseUp)
-  }, [leftIndex, rightIndex, panelStack, resizePanels, handlers, ref])
+  }, [controlledLeftProportion, controlledRightProportion, handlers, leftIndex, onResizeProportions, panelStack, ref, resizePanels, rightIndex])
 
   const handleDoubleClick = useCallback(() => {
     // Reset the two adjacent panels to equal share of their combined proportion
-    const left = panelStack[leftIndex]
-    const right = panelStack[rightIndex]
-    if (!left || !right) return
-    const combined = left.proportion + right.proportion
+    const combined = controlledLeftProportion !== undefined && controlledRightProportion !== undefined
+      ? controlledLeftProportion + controlledRightProportion
+      : (() => {
+          if (leftIndex === undefined || rightIndex === undefined) return null
+          const left = panelStack[leftIndex]
+          const right = panelStack[rightIndex]
+          if (!left || !right) return null
+          return left.proportion + right.proportion
+        })()
+    if (!combined) return
     const half = combined / 2
+    if (onResizeProportions) {
+      onResizeProportions({ left: half, right: half })
+      return
+    }
+    if (leftIndex === undefined || rightIndex === undefined) return
     resizePanels({
       leftIndex,
       rightIndex,
       leftProportion: half,
       rightProportion: half,
     })
-  }, [leftIndex, rightIndex, panelStack, resizePanels])
+  }, [controlledLeftProportion, controlledRightProportion, leftIndex, onResizeProportions, panelStack, resizePanels, rightIndex])
 
   return (
     <div
-      ref={ref}
       className="relative w-0 h-full cursor-col-resize flex justify-center shrink-0"
       style={{ margin: `0 ${PANEL_SASH_FLEX_MARGIN}px` }}
-      onMouseDown={handleMouseDown}
-      onMouseMove={handlers.onMouseMove}
-      onMouseLeave={handlers.onMouseLeave}
-      onDoubleClick={handleDoubleClick}
     >
       {/* Touch area — wider than visible line for easier grabbing */}
       <div
-        className="absolute inset-y-0 flex justify-center cursor-col-resize"
+        ref={ref}
+        className="absolute inset-y-0 z-[1] flex justify-center cursor-col-resize"
         style={{ left: -PANEL_SASH_HALF_HIT_WIDTH, right: -PANEL_SASH_HALF_HIT_WIDTH }}
+        onMouseDown={handleMouseDown}
+        onMouseMove={handlers.onMouseMove}
+        onMouseLeave={handlers.onMouseLeave}
+        onDoubleClick={handleDoubleClick}
       >
         <div
-          className="absolute left-1/2 -translate-x-1/2"
+          className="pointer-events-none absolute left-1/2 -translate-x-1/2"
           style={{
             ...gradientStyle,
             width: PANEL_SASH_LINE_WIDTH,

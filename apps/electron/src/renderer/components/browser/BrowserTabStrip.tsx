@@ -21,8 +21,11 @@ import {
 } from '@/components/ui/styled-dropdown'
 import {
   activeBrowserInstanceIdAtom,
+  browserDisplayModeAtom,
   browserInstancesAtom,
+  refreshBrowserDisplayModeAtom,
   setBrowserInstancesAtom,
+  toggleBrowserDisplayModeAtom,
   updateBrowserInstanceAtom,
   removeBrowserInstanceAtom,
 } from '@/atoms/browser-pane'
@@ -37,19 +40,32 @@ interface BrowserTabStripProps {
   activeSessionId?: string | null
   instancesOverride?: BrowserInstanceInfo[]
   maxVisibleBadges?: number
+  useNativeMenu?: boolean
+  workspaceId?: string | null
+  onOverlayOpenChange?: (open: boolean) => void
 }
 
 export function BrowserTabStrip({
   activeSessionId,
   instancesOverride,
   maxVisibleBadges = DEFAULT_MAX_VISIBLE_BADGES,
+  useNativeMenu = false,
+  workspaceId,
+  onOverlayOpenChange,
 }: BrowserTabStripProps) {
   const instances = useAtomValue(browserInstancesAtom)
   const setInstances = useSetAtom(setBrowserInstancesAtom)
   const updateInstance = useSetAtom(updateBrowserInstanceAtom)
   const removeInstance = useSetAtom(removeBrowserInstanceAtom)
+  const browserDisplayMode = useAtomValue(browserDisplayModeAtom)
+  const refreshBrowserDisplayMode = useSetAtom(refreshBrowserDisplayModeAtom)
+  const toggleBrowserDisplayMode = useSetAtom(toggleBrowserDisplayModeAtom)
   const [activeInstanceId, setActiveInstanceId] = useAtom(activeBrowserInstanceIdAtom)
-  const effectiveInstances = instancesOverride ?? instances
+  const effectiveInstances = useMemo(() => {
+    const scopedInstances = instancesOverride ?? instances
+    if (!workspaceId) return scopedInstances
+    return scopedInstances.filter((instance) => instance.workspaceId === workspaceId)
+  }, [instances, instancesOverride, workspaceId])
   const instancesRef = useRef(effectiveInstances)
   const removeReconcileTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -88,19 +104,20 @@ export function BrowserTabStrip({
 
     browserPaneApi.list()
       .then((items) => {
-        setInstances(items)
-        if (items.length === 0) {
+        const scopedItems = workspaceId ? items.filter((item) => item.workspaceId === workspaceId) : items
+        setInstances(scopedItems)
+        if (scopedItems.length === 0) {
           setActiveInstanceId(null)
           return
         }
-        setActiveInstanceId((prev) => prev ?? items[0].id)
+        setActiveInstanceId((prev) => prev ?? scopedItems[0].id)
       })
       .catch((error) => {
         console.warn('[BrowserTabStrip] Failed to list browser panes:', error)
         setInstances([])
         setActiveInstanceId(null)
       })
-  }, [instancesOverride, setInstances, setActiveInstanceId])
+  }, [instancesOverride, setInstances, setActiveInstanceId, workspaceId])
 
   useEffect(() => {
     if (instancesOverride) return
@@ -109,6 +126,10 @@ export function BrowserTabStrip({
     if (!browserPaneApi) return
 
     const cleanupState = browserPaneApi.onStateChanged((info: BrowserInstanceInfo) => {
+      if (workspaceId && info.workspaceId !== workspaceId) {
+        removeInstance(info.id)
+        return
+      }
       updateInstance(info)
     })
 
@@ -128,10 +149,11 @@ export function BrowserTabStrip({
         removeReconcileTimerRef.current = null
         void browserPaneApi.list()
           .then((items) => {
-            setInstances(items)
+            const scopedItems = workspaceId ? items.filter((item) => item.workspaceId === workspaceId) : items
+            setInstances(scopedItems)
             setActiveInstanceId((prev) => {
-              if (!prev) return items[0]?.id ?? null
-              return items.some((item) => item.id === prev) ? prev : (items[0]?.id ?? null)
+              if (!prev) return scopedItems[0]?.id ?? null
+              return scopedItems.some((item) => item.id === prev) ? prev : (scopedItems[0]?.id ?? null)
             })
           })
           .catch((error) => {
@@ -153,7 +175,7 @@ export function BrowserTabStrip({
         removeReconcileTimerRef.current = null
       }
     }
-  }, [instancesOverride, updateInstance, removeInstance, setActiveInstanceId, setInstances])
+  }, [instancesOverride, removeInstance, setActiveInstanceId, setInstances, updateInstance, workspaceId])
 
   useEffect(() => {
     if (orderedInstances.length === 0) {
@@ -165,6 +187,11 @@ export function BrowserTabStrip({
     }
   }, [orderedInstances, activeInstanceId, setActiveInstanceId])
 
+  useEffect(() => {
+    if (instancesOverride || !activeInstanceId) return
+    void refreshBrowserDisplayMode(activeInstanceId)
+  }, [instancesOverride, activeInstanceId, refreshBrowserDisplayMode])
+
   const focusBrowserWindow = useCallback((instance: BrowserInstanceInfo) => {
     setActiveInstanceId(instance.id)
     if (instancesOverride) return
@@ -175,10 +202,17 @@ export function BrowserTabStrip({
       return
     }
 
+    if (browserDisplayMode === 'inline') {
+      void browserPaneApi.attachToWindow(instance.id).catch((error) => {
+        console.warn(`[BrowserTabStrip] Failed to dock browser window ${instance.id}:`, error)
+      })
+      return
+    }
+
     void browserPaneApi.focus(instance.id).catch((error) => {
       console.warn(`[BrowserTabStrip] Failed to focus browser window ${instance.id}:`, error)
     })
-  }, [instancesOverride, setActiveInstanceId])
+  }, [browserDisplayMode, instancesOverride, setActiveInstanceId])
 
   const openSessionUsingWindow = useCallback((instance: BrowserInstanceInfo) => {
     const sessionId = instance.boundSessionId ?? instance.ownerSessionId
@@ -205,6 +239,45 @@ export function BrowserTabStrip({
       return remaining[0]?.id ?? null
     })
   }, [instancesOverride, removeInstance, setActiveInstanceId])
+
+  const handleToggleDisplayMode = useCallback(() => {
+    void toggleBrowserDisplayMode()
+  }, [toggleBrowserDisplayMode])
+
+  const handleNativeMenuAction = useCallback(async (instance: BrowserInstanceInfo) => {
+    const browserPaneApi = window.electronAPI?.browserPane
+    if (!browserPaneApi?.showContextMenu) {
+      console.warn('[BrowserTabStrip] browserPane API unavailable for native context menu')
+      return
+    }
+
+    let selectedAction: string | null = null
+    try {
+      selectedAction = await browserPaneApi.showContextMenu(instance.id, [
+        { id: 'show-window', label: 'Show Browser Window' },
+        { id: 'open-session', label: 'Open Session Which Used this Window', enabled: !!instance.boundSessionId },
+        { type: 'separator' },
+        { id: 'terminate', label: 'Terminate Browser', destructive: true },
+      ])
+    } catch (error) {
+      console.warn(`[BrowserTabStrip] Failed to show native context menu for ${instance.id}:`, error)
+      return
+    }
+
+    switch (selectedAction) {
+      case 'show-window':
+        focusBrowserWindow(instance)
+        break
+      case 'open-session':
+        openSessionUsingWindow(instance)
+        break
+      case 'terminate':
+        terminateBrowserWindow(instance)
+        break
+      default:
+        break
+    }
+  }, [focusBrowserWindow, openSessionUsingWindow, terminateBrowserWindow])
 
   const renderBrowserActions = useCallback((instance: BrowserInstanceInfo) => {
     const canUseLiveWindowActions = !instancesOverride
@@ -246,7 +319,7 @@ export function BrowserTabStrip({
     )
   }, [instancesOverride, focusBrowserWindow, openSessionUsingWindow, terminateBrowserWindow])
 
-  if (orderedInstances.length === 0) return null
+  if (orderedInstances.length === 0 && browserDisplayMode !== 'inline') return null
 
   const visibleBadgeCount = Math.max(1, maxVisibleBadges)
   const visible = orderedInstances.slice(0, visibleBadgeCount)
@@ -254,22 +327,46 @@ export function BrowserTabStrip({
 
   return (
     <div className="flex items-center gap-1.5">
+      <button
+        type="button"
+        onClick={handleToggleDisplayMode}
+        className="h-[26px] w-[26px] shrink-0 rounded-lg bg-background text-foreground/65 shadow-minimal transition-colors hover:bg-foreground/[0.03] hover:text-foreground titlebar-no-drag"
+        aria-label={browserDisplayMode === 'inline' ? 'Open browser in popup window' : 'Dock browser inline'}
+        title={browserDisplayMode === 'inline' ? 'Open browser in popup window' : 'Dock browser inline'}
+      >
+        {browserDisplayMode === 'inline' ? (
+          <Icons.ExternalLink className="mx-auto h-3.5 w-3.5" />
+        ) : (
+          <Icons.PanelRightOpen className="mx-auto h-3.5 w-3.5" />
+        )}
+      </button>
+
       {visible.map((instance) => (
-        <DropdownMenu key={instance.id}>
-          <DropdownMenuTrigger asChild>
-            <BrowserTabBadge
-              instance={instance}
-              isActive={instance.id === activeInstanceId}
-            />
-          </DropdownMenuTrigger>
-          <StyledDropdownMenuContent align="end" minWidth="min-w-56">
-            {renderBrowserActions(instance)}
-          </StyledDropdownMenuContent>
-        </DropdownMenu>
+        useNativeMenu ? (
+          <BrowserTabBadge
+            key={instance.id}
+            instance={instance}
+            isActive={instance.id === activeInstanceId}
+            onClose={() => terminateBrowserWindow(instance)}
+            onClick={() => { void handleNativeMenuAction(instance) }}
+          />
+        ) : (
+          <DropdownMenu key={instance.id} onOpenChange={onOverlayOpenChange}>
+            <DropdownMenuTrigger asChild>
+              <BrowserTabBadge
+                instance={instance}
+                isActive={instance.id === activeInstanceId}
+              />
+            </DropdownMenuTrigger>
+            <StyledDropdownMenuContent align="start" side="left" sideOffset={8} minWidth="min-w-56">
+              {renderBrowserActions(instance)}
+            </StyledDropdownMenuContent>
+          </DropdownMenu>
+        )
       ))}
 
       {overflow.length > 0 && (
-        <DropdownMenu>
+        <DropdownMenu onOpenChange={onOverlayOpenChange}>
           <DropdownMenuTrigger asChild>
             <button
               type="button"
@@ -278,7 +375,7 @@ export function BrowserTabStrip({
               +{overflow.length}
             </button>
           </DropdownMenuTrigger>
-          <StyledDropdownMenuContent align="end" minWidth="min-w-64">
+          <StyledDropdownMenuContent align="start" side="left" sideOffset={8} minWidth="min-w-64">
             {overflow.map((instance) => {
               const hostname = getHostname(instance.url)
               const displayLabel = instance.title.trim() || hostname || 'Local File'

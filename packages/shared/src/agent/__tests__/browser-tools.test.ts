@@ -14,7 +14,7 @@ import { createBrowserTools, type BrowserPaneFns } from '../browser-tools'
 
 function createMockFns(): BrowserPaneFns {
   return {
-    openPanel: async () => ({ instanceId: 'browser-test-1' }),
+    openPanel: async () => ({ instanceId: 'browser-test-1', displayMode: 'popup' as const }),
     navigate: async (url: string) => ({ url: `https://${url}`, title: 'Test Page' }),
     snapshot: async () => ({
       url: 'https://example.com',
@@ -58,6 +58,7 @@ function createMockFns(): BrowserPaneFns {
     listWindows: async () => ([
       {
         id: 'browser-1',
+        workspaceId: 'workspace-1',
         title: 'Example Domain',
         url: 'https://example.com',
         isVisible: true,
@@ -159,13 +160,14 @@ describe('createBrowserTools', () => {
       let openOptions: { background?: boolean } | undefined
       mockFns.openPanel = async (options) => {
         openOptions = options
-        return { instanceId: 'browser-test-1' }
+        return { instanceId: 'browser-test-1', displayMode: 'popup' as const }
       }
 
       const result = await executeTool(tools, 'browser_tool', { command: 'open' })
       expect(openOptions).toEqual({ background: true })
       expect(result.content[0].text).toContain('Opened in-app browser window in background')
       expect(result.content[0].text).toContain('browser-test-1')
+      expect(result.content[0].text).toContain('displayMode: popup')
     })
 
     it('routes open command with --foreground flag and reports settled visibility', async () => {
@@ -173,13 +175,14 @@ describe('createBrowserTools', () => {
       let listCalls = 0
       mockFns.openPanel = async (options) => {
         openOptions = options
-        return { instanceId: 'browser-test-1' }
+        return { instanceId: 'browser-test-1', displayMode: 'popup' as const }
       }
       mockFns.listWindows = async () => {
         listCalls += 1
         const isVisible = listCalls >= 3
         return [{
           id: 'browser-test-1',
+          workspaceId: 'workspace-1',
           title: 'Example Domain',
           url: 'https://example.com',
           isVisible,
@@ -193,8 +196,33 @@ describe('createBrowserTools', () => {
       const result = await executeTool(tools, 'browser_tool', { command: 'open --foreground' })
       expect(openOptions).toEqual({ background: false })
       expect(result.content[0].text).toContain('Opened in-app browser window in foreground')
+      expect(result.content[0].text).toContain('displayMode: popup')
       expect(result.content[0].text).toContain('Visibility settle: wait-loop')
       expect(result.content[0].text).toContain('Visible: true')
+    })
+
+    it('skips foreground visibility polling for inline mode', async () => {
+      let listCalls = 0
+      mockFns.openPanel = async () => ({ instanceId: 'browser-test-1', displayMode: 'inline' as const })
+      mockFns.listWindows = async () => {
+        listCalls += 1
+        return [{
+          id: 'browser-test-1',
+          workspaceId: 'workspace-1',
+          title: 'Example Domain',
+          url: 'https://example.com',
+          isVisible: true,
+          ownerType: 'session',
+          ownerSessionId: 'test-session',
+          boundSessionId: 'test-session',
+          agentControlActive: true,
+        }]
+      }
+
+      const result = await executeTool(tools, 'browser_tool', { command: 'open --foreground' })
+      expect(listCalls).toBe(2)
+      expect(result.content[0].text).toContain('displayMode: inline')
+      expect(result.content[0].text).not.toContain('Visibility settle:')
     })
 
     it('uses focus fallback when foreground open visibility does not settle in wait loop', async () => {
@@ -211,6 +239,7 @@ describe('createBrowserTools', () => {
           const isVisible = focusCalls > 0
           return [{
             id: 'browser-test-1',
+            workspaceId: 'workspace-1',
             title: 'Example Domain',
             url: 'https://example.com',
             isVisible,

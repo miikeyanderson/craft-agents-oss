@@ -69,6 +69,7 @@ function createMockDeps(): HandlerDeps {
     windowManager: {} as HandlerDeps['windowManager'],
     browserPaneManager: {
       onStateChange: () => {},
+      onDisplayModeChange: () => {},
       onRemoved: () => {},
       onInteracted: () => {},
     } as unknown as NonNullable<HandlerDeps['browserPaneManager']>,

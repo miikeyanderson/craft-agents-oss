@@ -121,7 +121,7 @@ export interface BrowserLifecycleActionResult {
 }
 
 export interface BrowserPaneFns {
-  openPanel: (options?: { background?: boolean }) => Promise<{ instanceId: string }>;
+  openPanel: (options?: { background?: boolean }) => Promise<{ instanceId: string; displayMode: 'inline' | 'popup' }>;
   navigate: (url: string) => Promise<{ url: string; title: string }>;
   snapshot: () => Promise<{ url: string; title: string; nodes: Array<{ ref: string; role: string; name: string; value?: string; description?: string; focused?: boolean; checked?: boolean; disabled?: boolean }> }>;
   click: (ref: string, options?: { waitFor?: 'none' | 'navigation' | 'network-idle'; timeoutMs?: number }) => Promise<void>;

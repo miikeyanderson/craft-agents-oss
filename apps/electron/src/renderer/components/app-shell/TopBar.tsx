@@ -36,7 +36,9 @@ import type { MenuItem, MenuSection, SettingsMenuItem } from "../../../shared/me
 import { SETTINGS_ICONS } from "../icons/SettingsIcons"
 import { SquarePenRounded } from "../icons/SquarePenRounded"
 import { useEffect, useRef, useState } from "react"
+import { useAtomValue } from "jotai"
 import { BrowserTabStrip } from "../browser/BrowserTabStrip"
+import { browserDisplayModeAtom, browserInstanceCountAtom } from "@/atoms/browser-pane"
 import type { Workspace } from "../../../shared/types"
 import { WorkspaceSwitcher } from "./WorkspaceSwitcher"
 import { getDocUrl } from "@craft-agent/shared/docs/doc-links"
@@ -179,6 +181,9 @@ export function TopBar({
   onAddSessionPanel,
   onAddBrowserPanel,
 }: TopBarProps) {
+  const browserDisplayMode = useAtomValue(browserDisplayModeAtom)
+  const browserInstanceCount = useAtomValue(browserInstanceCountAtom)
+  const showTopBarBrowserControls = browserDisplayMode !== 'inline' || browserInstanceCount === 0
   const [isDebugMode, setIsDebugMode] = useState(false)
   const [maxVisibleBrowserBadges, setMaxVisibleBrowserBadges] = useState(3)
   const rightSlotRef = useRef<HTMLDivElement | null>(null)
@@ -400,26 +405,34 @@ export function TopBar({
 
       {/* === RIGHT: Browser strip + add + help === */}
       <div ref={rightSlotRef} className="flex min-w-0 shrink-0 items-center justify-end gap-1" style={{ paddingRight: 12 }}>
-        <div className="min-w-0">
-          <BrowserTabStrip activeSessionId={activeSessionId} maxVisibleBadges={maxVisibleBrowserBadges} />
-        </div>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <TopBarButton aria-label="Add panel menu" className="ml-1 h-[26px] w-[26px] rounded-lg">
-              <Icons.Plus className="h-4 w-4 text-foreground/50" strokeWidth={1.5} />
-            </TopBarButton>
-          </DropdownMenuTrigger>
-          <StyledDropdownMenuContent align="end" minWidth="min-w-56">
-            <StyledDropdownMenuItem onClick={onAddSessionPanel}>
-              <SquarePenRounded className="h-3.5 w-3.5" />
-              New Session in Panel
-            </StyledDropdownMenuItem>
-            <StyledDropdownMenuItem onClick={onAddBrowserPanel}>
-              <Icons.Globe className="h-3.5 w-3.5" />
-              New Browser Window
-            </StyledDropdownMenuItem>
-          </StyledDropdownMenuContent>
-        </DropdownMenu>
+        {showTopBarBrowserControls && (
+          <div className="min-w-0">
+            <BrowserTabStrip
+              activeSessionId={activeSessionId}
+              maxVisibleBadges={maxVisibleBrowserBadges}
+              workspaceId={activeWorkspaceId}
+            />
+          </div>
+        )}
+        {showTopBarBrowserControls && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <TopBarButton aria-label="Add panel menu" className="ml-1 h-[26px] w-[26px] rounded-lg">
+                <Icons.Plus className="h-4 w-4 text-foreground/50" strokeWidth={1.5} />
+              </TopBarButton>
+            </DropdownMenuTrigger>
+            <StyledDropdownMenuContent align="end" minWidth="min-w-56">
+              <StyledDropdownMenuItem onClick={onAddSessionPanel}>
+                <SquarePenRounded className="h-3.5 w-3.5" />
+                New Session in Panel
+              </StyledDropdownMenuItem>
+              <StyledDropdownMenuItem onClick={onAddBrowserPanel}>
+                <Icons.Globe className="h-3.5 w-3.5" />
+                New Browser Window
+              </StyledDropdownMenuItem>
+            </StyledDropdownMenuContent>
+          </DropdownMenu>
+        )}
 
         {/* Help button */}
         <DropdownMenu>

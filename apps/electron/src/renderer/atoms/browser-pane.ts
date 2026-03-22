@@ -8,6 +8,9 @@
 import { atom } from 'jotai'
 import type { BrowserInstanceInfo } from '../../shared/types'
 
+type BrowserDisplayMode = 'popup' | 'inline'
+type BrowserInlineBounds = { x: number; y: number; width: number; height: number }
+
 /** Map of all browser instances by ID */
 export const browserInstancesMapAtom = atom<Map<string, BrowserInstanceInfo>>(new Map())
 
@@ -27,12 +30,59 @@ export const activeBrowserInstanceIdAtom = atom<string | null>(null)
 /** Tombstones for instances removed from renderer state (guards against late out-of-order updates) */
 export const removedBrowserInstanceIdsAtom = atom<Set<string>>(new Set<string>())
 
+/** Tracks whether the browser pane is docked inline or shown as a popup window */
+export const browserDisplayModeAtom = atom<BrowserDisplayMode>('inline')
+
+/** Tracks the current pixel bounds for the inline browser panel area */
+export const browserInlineBoundsAtom = atom<BrowserInlineBounds | null>(null)
+
 /** Derived: currently active browser instance info */
 export const activeBrowserInstanceAtom = atom<BrowserInstanceInfo | null>((get) => {
   const activeId = get(activeBrowserInstanceIdAtom)
   if (!activeId) return null
   return get(browserInstancesMapAtom).get(activeId) ?? null
 })
+
+browserDisplayModeAtom.onMount = (setAtom) => {
+  const browserPaneApi = window.electronAPI?.browserPane
+  if (!browserPaneApi) return
+
+  let isMounted = true
+  void browserPaneApi.getDisplayMode()
+    .then((mode) => {
+      if (isMounted) {
+        setAtom(mode)
+      }
+    })
+    .catch((error) => {
+      console.warn('[browser-pane] Failed to get browser display mode:', error)
+    })
+
+  const cleanup = browserPaneApi.onDisplayModeChanged((mode) => {
+    if (isMounted) {
+      setAtom(mode)
+    }
+  })
+
+  return () => {
+    isMounted = false
+    cleanup()
+  }
+}
+
+export const refreshBrowserDisplayModeAtom = atom(
+  null,
+  async (_get, set, id?: string) => {
+    const browserPaneApi = window.electronAPI?.browserPane
+    if (!browserPaneApi) return
+
+    try {
+      set(browserDisplayModeAtom, await browserPaneApi.getDisplayMode(id))
+    } catch (error) {
+      console.warn('[browser-pane] Failed to refresh browser display mode:', error)
+    }
+  }
+)
 
 /** Update a single browser instance (from IPC state change event) */
 export const updateBrowserInstanceAtom = atom(
@@ -78,5 +128,40 @@ export const setBrowserInstancesAtom = atom(
       removedIds.delete(info.id)
     }
     set(removedBrowserInstanceIdsAtom, removedIds)
+  }
+)
+
+/** Toggle the browser pane between popup and inline display modes */
+export const toggleBrowserDisplayModeAtom = atom(
+  null,
+  async (get, set) => {
+    const browserPaneApi = window.electronAPI?.browserPane
+    if (!browserPaneApi) return
+
+    const activeId = get(activeBrowserInstanceIdAtom) ?? undefined
+    const currentMode = get(browserDisplayModeAtom)
+    if (currentMode === 'popup') {
+      await browserPaneApi.attachToWindow(activeId)
+      set(browserDisplayModeAtom, 'inline')
+      return
+    }
+
+    await browserPaneApi.detachFromWindow(activeId)
+    set(browserDisplayModeAtom, 'popup')
+  }
+)
+
+/** Push inline panel bounds to main and mirror them locally */
+export const syncBrowserInlineBoundsAtom = atom(
+  null,
+  async (get, set, bounds: BrowserInlineBounds) => {
+    const browserPaneApi = window.electronAPI?.browserPane
+    if (!browserPaneApi) return
+
+    const activeId = get(activeBrowserInstanceIdAtom) ?? undefined
+    if (!activeId) return
+
+    await browserPaneApi.setInlineBounds(bounds, activeId)
+    set(browserInlineBoundsAtom, bounds)
   }
 )

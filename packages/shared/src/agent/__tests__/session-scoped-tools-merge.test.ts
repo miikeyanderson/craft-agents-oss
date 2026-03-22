@@ -15,7 +15,7 @@ describe('session-scoped tool callback merge', () => {
 
   it('preserves existing browserPaneFns when merging turn-level callbacks', () => {
     const browserPaneFns = {
-      openPanel: async () => ({ instanceId: 'browser-1' }),
+      openPanel: async () => ({ instanceId: 'browser-1', displayMode: 'popup' as const }),
       navigate: async () => ({ url: 'https://example.com', title: 'Example' }),
       snapshot: async () => ({ url: 'https://example.com', title: 'Example', nodes: [] }),
       click: async () => {},

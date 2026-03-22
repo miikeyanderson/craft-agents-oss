@@ -379,6 +379,18 @@ export function ThemeProvider({
     }
   }, [effectiveColorTheme, presetTheme, resolvedTheme, isDark])
 
+  // Push theme CSS to inline browser panes
+  useEffect(() => {
+    if (!window.electronAPI?.browserPane?.updateTheme) return
+
+    const cssVars = themeToCSS(resolvedTheme, isDark)
+    void window.electronAPI.browserPane.updateTheme(
+      cssVars,
+      isDark,
+      isScenic ? (resolvedTheme.backgroundImage || null) : null
+    )
+  }, [resolvedTheme, isDark, isScenic])
+
   // === System preference listener ===
   useEffect(() => {
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')

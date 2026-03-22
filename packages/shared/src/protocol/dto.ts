@@ -541,6 +541,7 @@ export interface WindowCloseRequest {
 
 export interface BrowserInstanceInfo {
   id: string
+  workspaceId: string | null
   url: string
   title: string
   favicon: string | null

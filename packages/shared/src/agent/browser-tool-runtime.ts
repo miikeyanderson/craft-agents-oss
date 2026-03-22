@@ -706,8 +706,9 @@ async function executeSingleCommand(args: {
     let win = windowsAfter.find((w) => w.id === result.instanceId);
     let settledByWait = true;
     let usedFocusFallback = false;
+    const shouldWaitForVisibility = foreground && result.displayMode === 'popup';
 
-    if (foreground) {
+    if (shouldWaitForVisibility) {
       const visibilityResult = await waitForForegroundOpenVisibility({
         fns,
         instanceId: result.instanceId,
@@ -723,10 +724,11 @@ async function executeSingleCommand(args: {
 
     const lines = [
       `Opened in-app browser window in ${mode} (instance: ${result.instanceId})`,
+      `displayMode: ${result.displayMode}`,
       `Window state: ${reused ? 'reused existing window' : 'created new window'}`,
       `Session windows: ${summarizeWindows(windowsAfter)}`,
     ];
-    if (foreground) {
+    if (shouldWaitForVisibility) {
       lines.push(`Visibility settle: ${settledByWait ? 'wait-loop' : 'timeout'}${usedFocusFallback ? ' + focus retry' : ''}`);
     }
     if (win) {

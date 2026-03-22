@@ -14,10 +14,11 @@ import { getHostname, getThemeLuminance } from './utils'
 interface BrowserTabBadgeProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   instance: BrowserInstanceInfo
   isActive: boolean
+  onClose?: () => void
 }
 
 export const BrowserTabBadge = forwardRef<HTMLButtonElement, BrowserTabBadgeProps>(function BrowserTabBadge(
-  { instance, isActive: _isActive, className, style, ...buttonProps },
+  { instance, isActive: _isActive, onClose, className, style, ...buttonProps },
   ref
 ) {
   const hostname = getHostname(instance.url)
@@ -87,9 +88,21 @@ export const BrowserTabBadge = forwardRef<HTMLButtonElement, BrowserTabBadgeProp
 
       <span className="truncate ml-0.5 leading-[12px]">{displayLabel}</span>
 
-      <span className="shrink-0 h-3 w-3 flex items-center justify-center opacity-55 group-hover:opacity-90 transition-opacity">
-        <Icons.ChevronDown className="h-2.5 w-2.5" />
-      </span>
+      {onClose ? (
+        <span
+          role="button"
+          tabIndex={-1}
+          className="shrink-0 h-3.5 w-3.5 flex items-center justify-center rounded opacity-0 group-hover:opacity-70 hover:!opacity-100 hover:bg-foreground/10 transition-opacity cursor-pointer"
+          onClick={(e) => { e.stopPropagation(); onClose() }}
+          aria-label="Close browser"
+        >
+          <Icons.X className="h-2.5 w-2.5" strokeWidth={2} />
+        </span>
+      ) : (
+        <span className="shrink-0 h-3 w-3 flex items-center justify-center opacity-55 group-hover:opacity-90 transition-opacity">
+          <Icons.ChevronDown className="h-2.5 w-2.5" />
+        </span>
+      )}
     </button>
   )
 })

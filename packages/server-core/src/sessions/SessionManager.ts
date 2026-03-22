@@ -2729,7 +2729,7 @@ export class SessionManager implements ISessionManager {
         const sid = managed.id
 
         const resolveSessionBrowserInstance = (toolName: string, options?: { show?: boolean }): string => {
-          const instanceId = bpm.createForSession(sid, { show: options?.show ?? false })
+          const instanceId = bpm.createForSession(sid, { show: options?.show ?? false, workspaceId: managed.workspace.id })
           const info = bpm.getInstance(instanceId)
           sessionLog.info(`[browser-pane] tool target resolved: ${toolName} session=${sid} instance=${instanceId} ownerType=${info?.ownerType ?? 'unknown'} ownerSessionId=${info?.ownerSessionId ?? 'none'} visible=${info?.isVisible ?? false}`)
           return instanceId
@@ -2789,7 +2789,7 @@ export class SessionManager implements ISessionManager {
                 : bpm.focusBoundForSession(sid)
               const info = bpm.getInstance(instanceId)
               sessionLog.info(`[browser-pane] route decision: browser_open session=${sid} instance=${instanceId} background=${options?.background ?? false} ownerType=${info?.ownerType ?? 'unknown'} ownerSessionId=${info?.ownerSessionId ?? 'none'} visible=${info?.isVisible ?? false}`)
-              return { instanceId }
+              return { instanceId, displayMode: info?.displayMode ?? 'popup' }
             },
             navigate: (url) => {
               const instanceId = resolveSessionBrowserInstance('browser_navigate')

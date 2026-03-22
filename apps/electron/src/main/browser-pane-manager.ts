@@ -132,6 +132,9 @@ interface AgentControlLockState {
 
 interface BrowserInstance {
   id: string
+  workspaceId: string | null
+  displayMode: 'popup' | 'inline'
+  inlineHostWindow: BrowserWindow | null
   window: BrowserWindow
   toolbarView: BrowserView
   pageView: BrowserView
@@ -152,6 +155,8 @@ interface BrowserInstance {
   toolbarMenuOpen: boolean
   toolbarMenuHeight: number
   toolbarMenuOverlayActive: boolean
+  rendererOverlayActive: boolean
+  inlineBounds: { x: number; y: number; width: number; height: number }
   showOnCreate: boolean
   pendingShowOnReady: boolean
   pendingShowToken: number
@@ -172,6 +177,7 @@ interface CreateBrowserInstanceOptions {
   show?: boolean
   ownerType?: 'session' | 'manual'
   ownerSessionId?: string
+  workspaceId?: string | null
 }
 
 export interface BrowserScreenshotOptions {
@@ -313,19 +319,30 @@ export class BrowserPaneManager implements IBrowserPaneManager {
   private instances: Map<string, BrowserInstance> = new Map()
   private destroyingIds: Set<string> = new Set()
   private stateChangeCallback: ((info: BrowserInstanceInfo) => void) | null = null
+  private displayModeChangeCallback: ((mode: 'popup' | 'inline') => void) | null = null
   private removedCallback: ((id: string) => void) | null = null
   private interactedCallback: ((id: string) => void) | null = null
   private partitionPermissionsInitialized = false
   private partitionObserversInitialized = false
   private inFlightRequestsByWebContentsId = new Map<number, number>()
   private lastNetworkActivityByWebContentsId = new Map<number, number>()
+  private lastThemeCSS: string | null = null
+  private lastThemeIsDark = nativeTheme.shouldUseDarkColors
+  private lastBackgroundImage: string | null = null
   private popupWindowsByParentInstanceId = new Map<string, Set<BrowserWindow>>()
   private popupParentByWebContentsId = new Map<number, string>()
+  private observedMainWindows = new Set<number>()
   private windowManager: WindowManager | null = null
+  private mainWindow: BrowserWindow | null = null
   private sessionPathResolver: ((sessionId: string) => string | null) | null = null
 
   setWindowManager(windowManager: WindowManager): void {
     this.windowManager = windowManager
+  }
+
+  setMainWindow(win: BrowserWindow): void {
+    this.mainWindow = win
+    this.observeMainWindow(win)
   }
 
   setSessionPathResolver(fn: (sessionId: string) => string | null): void {
@@ -334,6 +351,10 @@ export class BrowserPaneManager implements IBrowserPaneManager {
 
   onStateChange(callback: (info: BrowserInstanceInfo) => void): void {
     this.stateChangeCallback = callback
+  }
+
+  onDisplayModeChange(callback: (mode: 'popup' | 'inline') => void): void {
+    this.displayModeChangeCallback = callback
   }
 
   onRemoved(callback: (id: string) => void): void {
@@ -349,6 +370,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     const shouldShow = options?.show ?? false
     const ownerType = options?.ownerType ?? 'manual'
     const ownerSessionId = ownerType === 'session' ? (options?.ownerSessionId ?? null) : null
+    const workspaceId = options?.workspaceId ?? null
 
     if (this.instances.has(instanceId)) {
       mainLog.warn(`[browser-pane] Instance already exists, reusing: ${instanceId}`)
@@ -428,6 +450,9 @@ export class BrowserPaneManager implements IBrowserPaneManager {
 
     const instance: BrowserInstance = {
       id: instanceId,
+      workspaceId,
+      displayMode: 'inline',
+      inlineHostWindow: null,
       window,
       toolbarView,
       pageView,
@@ -448,6 +473,8 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       toolbarMenuOpen: false,
       toolbarMenuHeight: 0,
       toolbarMenuOverlayActive: false,
+      rendererOverlayActive: false,
+      inlineBounds: { x: 0, y: 0, width: 0, height: 0 },
       showOnCreate: shouldShow,
       pendingShowOnReady: false,
       pendingShowToken: 0,
@@ -473,19 +500,41 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       pageView.webContents.setUserAgent(sanitizedUa)
     }
 
-    window.addBrowserView(pageView)
-    window.addBrowserView(nativeOverlayView)
-    window.addBrowserView(toolbarView)
-    window.setTopBrowserView(toolbarView)
-    void this.loadNativeOverlayPage(instance)
-
-    this.layoutAllViews(instance)
-
+    // Register instance before adding views so attachToWindow can find it
     this.setupWindowListeners(instance)
     this.instances.set(instanceId, instance)
+
+    // Determine target window: main window for inline mode, popup window otherwise
+    let targetWindow = window
+    if (instance.displayMode === 'inline') {
+      const hostWindow = this.resolveHostWindow()
+      if (hostWindow && !hostWindow.isDestroyed()) {
+        targetWindow = hostWindow
+        instance.inlineHostWindow = hostWindow
+        instance.isVisible = true
+        this.mainWindow = hostWindow
+        this.observeMainWindow(hostWindow)
+        mainLog.info(`[browser-pane] Creating instance ${instanceId} directly in inline mode`)
+      } else {
+        // Fall back to popup if main window isn't ready
+        instance.displayMode = 'popup'
+        mainLog.info(`[browser-pane] Main window not ready, falling back to popup for ${instanceId}`)
+      }
+    }
+
+    targetWindow.addBrowserView(pageView)
+    targetWindow.addBrowserView(nativeOverlayView)
+    targetWindow.addBrowserView(toolbarView)
+    targetWindow.setTopBrowserView(toolbarView)
+    void this.loadNativeOverlayPage(instance)
+
+    if (instance.displayMode !== 'inline') {
+      this.layoutAllViews(instance)
+    }
+
     this.emitStateChange(instance)
     mainLog.info(`[browser-pane] toolbar version: v4-react-chromeless`)
-    mainLog.info(`[browser-pane] Created instance: ${instanceId} (show=${shouldShow}, ownerType=${ownerType}, ownerSessionId=${ownerSessionId ?? 'none'})`)
+    mainLog.info(`[browser-pane] Created instance: ${instanceId} (show=${shouldShow}, ownerType=${ownerType}, ownerSessionId=${ownerSessionId ?? 'none'}, workspaceId=${workspaceId ?? 'none'}, mode=${instance.displayMode})`)
 
     void this.loadToolbarPage(instance)
       .finally(() => {
@@ -500,6 +549,169 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     })
 
     return instanceId
+  }
+
+  async injectThemeCSS(themeCSS: string, isDark: boolean, backgroundImage: string | null): Promise<void> {
+    // Derive isDark from the CSS content itself to avoid multi-window race conditions.
+    // Multiple renderer windows may push conflicting isDark values. The CSS --background
+    // color is the single source of truth.
+    const derivedIsDark = this.deriveIsDarkFromCSS(themeCSS) ?? isDark
+
+    this.lastThemeCSS = themeCSS
+    this.lastThemeIsDark = derivedIsDark
+    this.lastBackgroundImage = backgroundImage
+
+    mainLog.info(`[browser-pane] injectThemeCSS: isDark=${derivedIsDark} (param=${isDark}), instances=${this.instances.size}, cssLength=${themeCSS.length}`)
+
+    if (this.instances.size === 0) return
+
+    const script = this.buildThemeInjectionScript(themeCSS, derivedIsDark, backgroundImage)
+    const bgMatch = themeCSS.match(/--background:\s*([^;]+);/)
+    const bgColor = bgMatch ? bgMatch[1].trim() : null
+
+    for (const instance of this.instances.values()) {
+      let hexBg: string | null = null
+      try {
+        await instance.pageView.webContents.executeJavaScript(script)
+        if (bgColor) {
+          hexBg = await instance.pageView.webContents.executeJavaScript(
+            `(() => { const d = document.createElement('div'); d.style.color = '${bgColor.replace(/'/g, "\\'")}'; document.body.appendChild(d); const c = getComputedStyle(d).color; document.body.removeChild(d); const m = c.match(/\\d+/g); return m ? '#' + m.slice(0,3).map(x => parseInt(x).toString(16).padStart(2,'0')).join('') : null; })()`
+          ).catch(() => null)
+          if (hexBg) {
+            const wcWithBg = instance.pageView.webContents as typeof instance.pageView.webContents & { setBackgroundColor?: (c: string) => void }
+            wcWithBg.setBackgroundColor?.(hexBg)
+          }
+        }
+      } catch {
+        // webContents may be destroyed
+      }
+
+      try {
+        await instance.toolbarView.webContents.executeJavaScript(script)
+        if (hexBg) {
+          const toolbarWcWithBg = instance.toolbarView.webContents as typeof instance.toolbarView.webContents & { setBackgroundColor?: (c: string) => void }
+          toolbarWcWithBg.setBackgroundColor?.(hexBg)
+        }
+      } catch {
+        // webContents may be destroyed
+      }
+    }
+  }
+
+  private async injectThemeCSSForInstance(instance: BrowserInstance): Promise<void> {
+    const darkClass = this.lastThemeIsDark ? 'dark' : 'light'
+    const removeClass = this.lastThemeIsDark ? 'light' : 'dark'
+    const classScript = `(() => {
+      document.documentElement.classList.remove('${removeClass}');
+      document.documentElement.classList.add('${darkClass}');
+    })()`
+
+    if (this.lastThemeCSS == null) {
+      try {
+        await instance.pageView.webContents.executeJavaScript(classScript)
+      } catch {}
+
+      try {
+        await instance.toolbarView.webContents.executeJavaScript(classScript)
+      } catch {}
+
+      return
+    }
+
+    const script = this.buildThemeInjectionScript(this.lastThemeCSS, this.lastThemeIsDark, this.lastBackgroundImage)
+
+    try {
+      await instance.pageView.webContents.executeJavaScript(script)
+    } catch {
+      // webContents may be destroyed
+    }
+
+    try {
+      await instance.toolbarView.webContents.executeJavaScript(script)
+    } catch {
+      // webContents may be destroyed
+    }
+  }
+
+  private buildThemeInjectionScript(themeCSS: string, isDark: boolean, backgroundImage?: string | null): string {
+    const setPropertyCalls: string[] = []
+    const cssImportantRules: string[] = []
+    const varRegex = /--([a-zA-Z0-9-]+):\s*([^;]+);/g
+    let match: RegExpExecArray | null
+
+    while ((match = varRegex.exec(themeCSS)) !== null) {
+      const name = `--${match[1]}`
+      const value = match[2].trim()
+      const escapedName = name.replace(/'/g, "\\'")
+      const escapedValue = value.replace(/'/g, "\\'")
+      setPropertyCalls.push(`r.style.setProperty('${escapedName}', '${escapedValue}', 'important')`)
+      cssImportantRules.push(`${name}: ${value} !important;`)
+    }
+
+    const darkClass = isDark ? 'dark' : 'light'
+    const removeClass = isDark ? 'light' : 'dark'
+    const backgroundImageLiteral = JSON.stringify(backgroundImage ?? null)
+
+    // Belt-and-suspenders: set inline styles with !important priority AND
+    // inject a <style> tag with !important rules that survives Vite HMR.
+    const cssBlock = `html, :root { ${cssImportantRules.join(' ')} }`
+
+    return `(() => {
+      const r = document.documentElement;
+      const scenicBackgroundImage = ${backgroundImageLiteral};
+      r.classList.remove('${removeClass}');
+      r.classList.add('${darkClass}');
+      ${setPropertyCalls.join(';\n      ')};
+      if (scenicBackgroundImage) {
+        r.dataset.scenic = 'true';
+        r.style.setProperty('--background-image', \`url("\${scenicBackgroundImage.replace(/"/g, '\\\\"')}")\`);
+      } else {
+        delete r.dataset.scenic;
+        r.style.removeProperty('--background-image');
+      }
+      let s = document.getElementById('craft-theme-inject');
+      if (!s) { s = document.createElement('style'); s.id = 'craft-theme-inject'; document.head.appendChild(s); }
+      s.textContent = '${cssBlock.replace(/'/g, "\\'")}';
+    })()`
+  }
+
+  /**
+   * Determine if the theme CSS represents a dark or light theme by parsing
+   * the --background color value's luminance. Returns null if unparseable.
+   */
+  private deriveIsDarkFromCSS(themeCSS: string): boolean | null {
+    const bgMatch = themeCSS.match(/--background:\s*([^;]+);/)
+    if (!bgMatch) return null
+    const bgValue = bgMatch[1].trim()
+
+    // oklch(L C H) — L is lightness 0-1
+    const oklchMatch = bgValue.match(/oklch\(\s*([\d.]+)/)
+    if (oklchMatch && oklchMatch[1]) {
+      const lightness = parseFloat(oklchMatch[1])
+      return lightness < 0.5
+    }
+
+    // hex #rrggbb
+    const hexMatch = bgValue.match(/^#([0-9a-f]{6})$/i)
+    if (hexMatch && hexMatch[1]) {
+      const r = parseInt(hexMatch[1].slice(0, 2), 16) / 255
+      const g = parseInt(hexMatch[1].slice(2, 4), 16) / 255
+      const b = parseInt(hexMatch[1].slice(4, 6), 16) / 255
+      const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+      return luminance < 0.4
+    }
+
+    // hex #rgb
+    const hexShortMatch = bgValue.match(/^#([0-9a-f]{3})$/i)
+    if (hexShortMatch && hexShortMatch[1]) {
+      const r = parseInt(hexShortMatch[1][0].repeat(2), 16) / 255
+      const g = parseInt(hexShortMatch[1][1].repeat(2), 16) / 255
+      const b = parseInt(hexShortMatch[1][2].repeat(2), 16) / 255
+      const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+      return luminance < 0.4
+    }
+
+    return null
   }
 
   destroyInstance(id: string): void {
@@ -537,6 +749,12 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     runCleanup('closePopupsForParent', () => this.closePopupsForParent(instance.id, 'parent_destroy'))
     runCleanup('applyAgentControlLock', () => this.applyAgentControlLock(instance, false))
     runCleanup('updateNativeOverlayState', () => this.updateNativeOverlayState(instance))
+    runCleanup('removeBrowserViews', () => {
+      const hostWindow = this.getInlineHostWindow(instance)
+      if (instance.displayMode === 'inline' && hostWindow && !hostWindow.isDestroyed()) {
+        this.removeBrowserViews(hostWindow, instance)
+      }
+    })
 
     try {
       if (!instance.window.isDestroyed()) {
@@ -745,6 +963,17 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     const instance = this.instances.get(id)
     if (!instance) return
 
+    if (instance.displayMode === 'inline') {
+      const hostWindow = this.getInlineHostWindow(instance)
+      if (!hostWindow || hostWindow.isDestroyed()) return
+      if (hostWindow.isMinimized()) hostWindow.restore()
+      hostWindow.show()
+      hostWindow.focus()
+      instance.pageView.webContents.focus()
+      this.interactedCallback?.(instance.id)
+      return
+    }
+
     const win = instance.window
     if (win.isDestroyed()) return
 
@@ -758,12 +987,18 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       return
     }
 
-    if (win.isMinimized()) win.restore()
-    win.show()
-    win.focus()
+    // When inline, focus the main window instead of the popup
+    if (instance.displayMode === 'inline') {
+      const hostWindow = this.getInlineHostWindow(instance)
+      if (hostWindow && !hostWindow.isDestroyed()) {
+        hostWindow.focus()
+      }
+      instance.isVisible = true
+      this.emitStateChange(instance)
+      return
+    }
 
-    instance.isVisible = true
-    this.emitStateChange(instance)
+    this.showPopupWindow(instance)
   }
 
   hide(id: string): void {
@@ -1269,14 +1504,8 @@ export class BrowserPaneManager implements IBrowserPaneManager {
 
     if (!window.isDestroyed()) {
       try {
-        if (!wasVisible) {
-          if (window.isMinimized()) {
-            window.restore()
-          }
-          window.showInactive()
-          instance.isVisible = true
-          this.emitStateChange(instance)
-          rescueUsed = true
+        if (!wasVisible && !this.shouldKeepPopupWindowHidden(instance)) {
+          rescueUsed = this.showPopupWindow(instance, true)
           await this.sleep(SCREENSHOT_RESCUE_PAINT_DELAY_MS)
           await this.waitForScreenshotReadiness(instance.id)
         }
@@ -1306,7 +1535,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
           return { imageBuffer: rescueResult.buffer, imageFormat: rescueResult.format, warnings }
         }
       } finally {
-        if (!wasVisible && !window.isDestroyed()) {
+        if (!wasVisible && rescueUsed && !window.isDestroyed()) {
           window.hide()
           instance.isVisible = false
           this.emitStateChange(instance)
@@ -1744,15 +1973,19 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     return null
   }
 
-  private findReusableUnboundInstance(): BrowserInstance | null {
-    const unbound = Array.from(this.instances.values()).filter(i => i.boundSessionId === null && i.ownerType === 'manual')
+  private findReusableUnboundInstance(workspaceId: string | null = null): BrowserInstance | null {
+    const unbound = Array.from(this.instances.values()).filter(i => (
+      i.boundSessionId === null
+      && i.ownerType === 'manual'
+      && i.workspaceId === workspaceId
+    ))
     if (unbound.length === 0) return null
 
     // Prefer visible windows first, then fall back to first available.
     return unbound.find(i => i.isVisible) ?? unbound[0]
   }
 
-  createForSession(sessionId: string, options?: { show?: boolean }): string {
+  createForSession(sessionId: string, options?: { show?: boolean; workspaceId?: string | null }): string {
     const existing = this.getBoundForSession(sessionId)
     if (existing) {
       if (options?.show) {
@@ -1763,7 +1996,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
 
     // Reuse an unbound/manual window before creating a new one.
     // This helps agents avoid unnecessary browser window sprawl.
-    const reusable = this.findReusableUnboundInstance()
+    const reusable = this.findReusableUnboundInstance(options?.workspaceId ?? null)
     if (reusable) {
       this.bindSession(reusable.id, sessionId)
       if (options?.show) {
@@ -1777,6 +2010,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       show: options?.show ?? false,
       ownerType: 'session',
       ownerSessionId: sessionId,
+      workspaceId: options?.workspaceId ?? null,
     })
   }
 
@@ -1922,6 +2156,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
   }
 
   private getToolbarEffectiveHeight(instance: BrowserInstance): number {
+    if (instance.displayMode === 'inline') return TOOLBAR_HEIGHT
     if (!instance.toolbarMenuOpen) return TOOLBAR_HEIGHT
 
     const [, contentHeight] = instance.window.getContentSize()
@@ -1937,24 +2172,32 @@ export class BrowserPaneManager implements IBrowserPaneManager {
   }
 
   private updateNativeOverlayState(instance: BrowserInstance): void {
+    const hostWindow = instance.displayMode === 'inline'
+      ? this.getInlineHostWindow(instance)
+      : instance.window
     const control = instance.agentControl
     const agentActive = !!control?.active
     const menuActive = !!instance.toolbarMenuOverlayActive
     const shouldShow = agentActive || menuActive
 
-    if (!shouldShow || !instance.nativeOverlayReady || instance.window.isDestroyed()) {
+    if (!hostWindow || hostWindow.isDestroyed() || !shouldShow || !instance.nativeOverlayReady || instance.rendererOverlayActive) {
       instance.nativeOverlayView.setBounds({ x: 0, y: 0, width: 0, height: 0 })
-      if (!instance.window.isDestroyed()) {
-        instance.window.setTopBrowserView(instance.toolbarView)
+      if (hostWindow && !hostWindow.isDestroyed()) {
+        hostWindow.setTopBrowserView(instance.toolbarView)
       }
       return
     }
 
-    const [width, height] = instance.window.getContentSize()
-    const overlayHeight = Math.max(100, height - TOOLBAR_HEIGHT)
-    instance.nativeOverlayView.setBounds({ x: 0, y: TOOLBAR_HEIGHT, width, height: overlayHeight })
+    if (instance.displayMode === 'inline') {
+      const pageBounds = instance.pageView.getBounds()
+      instance.nativeOverlayView.setBounds(pageBounds)
+    } else {
+      const [width, height] = hostWindow.getContentSize()
+      const overlayHeight = Math.max(100, height - TOOLBAR_HEIGHT)
+      instance.nativeOverlayView.setBounds({ x: 0, y: TOOLBAR_HEIGHT, width, height: overlayHeight })
+    }
     instance.nativeOverlayView.setAutoResize({ width: true, height: true })
-    instance.window.setTopBrowserView(instance.toolbarView)
+    hostWindow.setTopBrowserView(instance.toolbarView)
 
     if (agentActive) {
       const label = this.getAgentControlLabel(control)
@@ -2032,11 +2275,20 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       return
     }
 
+    const runCleanup = (label: string, action: () => void): void => {
+      try {
+        action()
+      } catch (error) {
+        mainLog.warn(`[browser-pane] finalize cleanup failed id=${instance.id} step=${label} error=${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+
     this.destroyingIds.delete(instance.id)
-    this.closePopupsForParent(instance.id, 'parent_destroy')
-    this.applyAgentControlLock(instance, false)
-    this.updateNativeOverlayState(instance)
-    instance.cdp.detach()
+    runCleanup('closePopupsForParent', () => this.closePopupsForParent(instance.id, 'parent_destroy'))
+    runCleanup('applyAgentControlLock', () => this.applyAgentControlLock(instance, false))
+    runCleanup('updateNativeOverlayState', () => this.updateNativeOverlayState(instance))
+    instance.inlineHostWindow = null
+    runCleanup('cdp.detach', () => instance.cdp.detach())
     this.instances.delete(instance.id)
     this.removedCallback?.(instance.id)
     mainLog.info(`[browser-pane] Destroyed instance: ${instance.id} (${source})`)
@@ -2050,11 +2302,41 @@ export class BrowserPaneManager implements IBrowserPaneManager {
   }
 
   private layoutAllViews(instance: BrowserInstance): void {
+    if (instance.displayMode === 'inline') {
+      this.updateNativeOverlayState(instance)
+      return
+    }
+
     this.layoutToolbarView(instance)
     this.layoutPageView(instance)
     if (!instance.window.isDestroyed()) {
       instance.window.setTopBrowserView(instance.toolbarView)
     }
+  }
+
+  private addBrowserViews(window: BrowserWindow, instance: BrowserInstance): void {
+    window.addBrowserView(instance.pageView)
+    window.addBrowserView(instance.nativeOverlayView)
+    window.addBrowserView(instance.toolbarView)
+  }
+
+  private removeBrowserViews(window: BrowserWindow, instance: BrowserInstance): void {
+    const winWithViews = window as BrowserWindow & {
+      getBrowserViews?: () => BrowserView[]
+      removeBrowserView?: (view: BrowserView) => void
+    }
+    const attachedViews = typeof winWithViews.getBrowserViews === 'function'
+      ? new Set(winWithViews.getBrowserViews())
+      : null
+
+    const removeView = (view: BrowserView): void => {
+      if (attachedViews && !attachedViews.has(view)) return
+      winWithViews.removeBrowserView?.(view)
+    }
+
+    removeView(instance.pageView)
+    removeView(instance.nativeOverlayView)
+    removeView(instance.toolbarView)
   }
 
   private forceCloseToolbarMenu(instance: BrowserInstance, reason: string): void {
@@ -2313,6 +2595,302 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     mainLog.info('[browser-pane] Toolbar IPC handlers registered')
   }
 
+  attachToWindow(instanceId: string, hostWindowWebContentsId?: number): void {
+    const instance = this.requireAliveInstance(instanceId)
+    const hostWindow = this.resolveHostWindow(hostWindowWebContentsId)
+
+    if (!hostWindow || hostWindow.isDestroyed()) {
+      throw new Error('[browser-pane] Cannot attach inline browser without a main window')
+    }
+
+    for (const other of this.instances.values()) {
+      if (other.id === instance.id || other.displayMode !== 'inline') continue
+      const otherHostWindow = this.getInlineHostWindow(other)
+      if (otherHostWindow && !otherHostWindow.isDestroyed()) {
+        this.removeBrowserViews(otherHostWindow, other)
+      }
+
+      other.displayMode = 'popup'
+      other.inlineHostWindow = null
+
+      if (!other.window.isDestroyed()) {
+        this.addBrowserViews(other.window, other)
+        this.layoutAllViews(other)
+        other.window.hide()
+      }
+
+      other.isVisible = false
+      this.emitStateChange(other)
+    }
+
+    if (instance.displayMode === 'inline') {
+      const currentHostWindow = this.getInlineHostWindow(instance)
+      if (currentHostWindow === hostWindow) {
+        this.relayoutInlineInstance(instance)
+        return
+      }
+
+      if (currentHostWindow && !currentHostWindow.isDestroyed()) {
+        this.removeBrowserViews(currentHostWindow, instance)
+      }
+    } else if (!instance.window.isDestroyed()) {
+      this.removeBrowserViews(instance.window, instance)
+      instance.window.hide()
+    }
+
+    instance.inlineHostWindow = hostWindow
+    this.mainWindow = hostWindow
+    this.observeMainWindow(hostWindow)
+    this.addBrowserViews(hostWindow, instance)
+    hostWindow.setTopBrowserView(instance.toolbarView)
+    instance.displayMode = 'inline'
+    instance.isVisible = true
+    this.relayoutInlineInstance(instance)
+    this.emitStateChange(instance)
+    this.emitDisplayModeChange(instance.displayMode)
+    mainLog.info(`[browser-pane] attached instance to main window id=${instance.id} hostWindowWebContentsId=${hostWindow.webContents.id}`)
+  }
+
+  detachFromWindow(instanceId: string): void {
+    const instance = this.requireAliveInstance(instanceId)
+    const hostWindow = this.getInlineHostWindow(instance)
+
+    if (instance.displayMode !== 'inline') {
+      return
+    }
+
+    if (hostWindow && !hostWindow.isDestroyed()) {
+      this.removeBrowserViews(hostWindow, instance)
+    }
+
+    instance.displayMode = 'popup'
+    instance.inlineHostWindow = null
+
+    if (!instance.window.isDestroyed()) {
+      this.addBrowserViews(instance.window, instance)
+      this.layoutAllViews(instance)
+      instance.window.show()
+    }
+
+    this.emitStateChange(instance)
+    this.emitDisplayModeChange(instance.displayMode)
+    mainLog.info(`[browser-pane] detached instance from main window id=${instance.id}`)
+  }
+
+  hideInstancesForWorkspace(workspaceId: string): void {
+    mainLog.info(`[browser-pane] hideInstancesForWorkspace called workspaceId=${workspaceId} totalInstances=${this.instances.size}`)
+    for (const instance of this.instances.values()) {
+      mainLog.info(`[browser-pane] checking instance id=${instance.id} workspaceId=${instance.workspaceId} displayMode=${instance.displayMode}`)
+      if (instance.workspaceId !== workspaceId || instance.displayMode !== 'inline') continue
+
+      const hostWindow = this.getInlineHostWindow(instance)
+      mainLog.info(`[browser-pane] hiding inline instance id=${instance.id} hostWindow=${hostWindow ? 'found' : 'null'} destroyed=${hostWindow?.isDestroyed()}`)
+      if (hostWindow && !hostWindow.isDestroyed()) {
+        this.removeBrowserViews(hostWindow, instance)
+      }
+
+      instance.inlineHostWindow = null
+      instance.isVisible = false
+      this.emitStateChange(instance)
+    }
+  }
+
+  showInstancesForWorkspace(workspaceId: string, hostWindow: BrowserWindow): void {
+    if (hostWindow.isDestroyed()) return
+
+    let restoredInline = false
+    this.mainWindow = hostWindow
+    this.observeMainWindow(hostWindow)
+
+    for (const instance of this.instances.values()) {
+      if (instance.workspaceId !== workspaceId || instance.displayMode !== 'inline') continue
+
+      this.addBrowserViews(hostWindow, instance)
+      hostWindow.setTopBrowserView(instance.toolbarView)
+      instance.inlineHostWindow = hostWindow
+      instance.isVisible = true
+      this.relayoutInlineInstance(instance)
+      this.emitStateChange(instance)
+      restoredInline = true
+    }
+
+    if (restoredInline) {
+      this.emitDisplayModeChange('inline')
+    }
+  }
+
+  setInlineBounds(instanceId: string, bounds: { x: number; y: number; width: number; height: number }): void {
+    const instance = this.requireAliveInstance(instanceId)
+    if (instance.displayMode !== 'inline') {
+      return
+    }
+
+    const normalizedX = Math.floor(bounds.x)
+    const normalizedY = Math.floor(bounds.y)
+    const normalizedWidth = Math.max(0, Math.floor(bounds.width))
+    const normalizedHeight = Math.max(0, Math.floor(bounds.height))
+    const normalizedBounds = {
+      x: normalizedX,
+      y: normalizedY,
+      width: normalizedWidth,
+      height: normalizedHeight,
+    }
+    const pageBounds = this.getInlinePageBounds(normalizedBounds)
+
+    instance.inlineBounds = normalizedBounds
+
+    if (!instance.rendererOverlayActive) {
+      instance.toolbarView.setBounds({ x: normalizedX, y: normalizedY, width: normalizedWidth, height: TOOLBAR_HEIGHT })
+      instance.pageView.setBounds(pageBounds)
+      instance.nativeOverlayView.setBounds(pageBounds)
+    }
+    this.updateNativeOverlayState(instance)
+  }
+
+  setRendererOverlayActive(instanceId: string, active: boolean): void {
+    const instance = this.requireAliveInstance(instanceId)
+    if (instance.displayMode !== 'inline') {
+      return
+    }
+
+    const nextActive = !!active
+    if (instance.rendererOverlayActive === nextActive) {
+      return
+    }
+
+    instance.rendererOverlayActive = nextActive
+
+    const zeroBounds = { x: 0, y: 0, width: 0, height: 0 }
+
+    if (nextActive) {
+      instance.toolbarView.setBounds(zeroBounds)
+      instance.pageView.setBounds(zeroBounds)
+      instance.nativeOverlayView.setBounds(zeroBounds)
+      this.updateNativeOverlayState(instance)
+      return
+    }
+
+    // Restore all views to their inline bounds
+    if (instance.inlineBounds) {
+      const { x, y, width, height } = instance.inlineBounds
+      instance.toolbarView.setBounds({ x, y, width, height: TOOLBAR_HEIGHT })
+    }
+    const pageBounds = this.getInlinePageBounds(instance.inlineBounds)
+    instance.pageView.setBounds(pageBounds)
+    instance.nativeOverlayView.setBounds(pageBounds)
+    this.updateNativeOverlayState(instance)
+  }
+
+  getDisplayMode(instanceId: string): 'popup' | 'inline' {
+    return this.requireAliveInstance(instanceId).displayMode
+  }
+
+  private resolveHostWindow(hostWindowWebContentsId?: number): BrowserWindow | null {
+    if (hostWindowWebContentsId != null) {
+      const matchedWindow = this.windowManager?.getWindowByWebContentsId(hostWindowWebContentsId) ?? null
+      if (matchedWindow && !matchedWindow.isDestroyed()) {
+        return matchedWindow
+      }
+    }
+
+    const activeWindow = this.windowManager?.getFocusedWindow()
+      ?? this.windowManager?.getLastActiveWindow()
+      ?? this.mainWindow
+
+    return activeWindow && !activeWindow.isDestroyed() ? activeWindow : null
+  }
+
+  private getInlineHostWindow(instance: BrowserInstance): BrowserWindow | null {
+    const hostWindow = instance.inlineHostWindow && !instance.inlineHostWindow.isDestroyed()
+      ? instance.inlineHostWindow
+      : null
+
+    if (hostWindow) {
+      return hostWindow
+    }
+
+    return this.mainWindow && !this.mainWindow.isDestroyed() ? this.mainWindow : null
+  }
+
+  private shouldKeepPopupWindowHidden(instance: BrowserInstance): boolean {
+    return instance.displayMode === 'inline'
+  }
+
+  private showPopupWindow(instance: BrowserInstance, inactive = false): boolean {
+    if (this.shouldKeepPopupWindowHidden(instance) || instance.window.isDestroyed()) {
+      return false
+    }
+
+    if (instance.window.isMinimized()) {
+      instance.window.restore()
+    }
+
+    if (inactive) {
+      instance.window.showInactive()
+    } else {
+      instance.window.show()
+      instance.window.focus()
+    }
+
+    instance.isVisible = true
+    this.emitStateChange(instance)
+    return true
+  }
+
+  private observeMainWindow(win: BrowserWindow): void {
+    const webContentsId = win.webContents.id
+    if (this.observedMainWindows.has(webContentsId)) {
+      return
+    }
+
+    this.observedMainWindows.add(webContentsId)
+
+    win.on('focus', () => {
+      this.mainWindow = win
+    })
+
+    win.on('resize', () => {
+      this.relayoutInlineInstancesForHostWindow(win)
+    })
+
+    win.on('move', () => {
+      this.relayoutInlineInstancesForHostWindow(win)
+    })
+
+    win.once('closed', () => {
+      this.observedMainWindows.delete(webContentsId)
+      if (this.mainWindow === win) {
+        this.mainWindow = this.windowManager?.getLastActiveWindow() ?? null
+      }
+      for (const instance of this.instances.values()) {
+        if (instance.inlineHostWindow === win) {
+          instance.inlineHostWindow = null
+        }
+      }
+    })
+  }
+
+  private relayoutInlineInstancesForHostWindow(hostWindow: BrowserWindow): void {
+    for (const instance of this.instances.values()) {
+      if (instance.displayMode !== 'inline') continue
+      if (this.getInlineHostWindow(instance) !== hostWindow) continue
+      this.relayoutInlineInstance(instance)
+    }
+  }
+
+  private getInlinePageBounds(bounds: { x: number; y: number; width: number; height: number }): { x: number; y: number; width: number; height: number } {
+    return {
+      x: bounds.x,
+      y: bounds.y + TOOLBAR_HEIGHT,
+      width: bounds.width,
+      height: Math.max(0, bounds.height - TOOLBAR_HEIGHT),
+    }
+  }
+
+  private relayoutInlineInstance(instance: BrowserInstance): void {
+    this.setInlineBounds(instance.id, instance.inlineBounds)
+  }
+
   private markToolbarReady(instance: BrowserInstance, reason: string): void {
     if (instance.toolbarReady || instance.window.isDestroyed()) return
 
@@ -2328,11 +2906,14 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     if (instance.window.isDestroyed()) return
     if (instance.pendingShowToken !== tokenAtReady) return
 
-    instance.window.show()
-    instance.window.focus()
-    instance.isVisible = true
-    this.emitStateChange(instance)
+    // Don't show the popup window when browser is docked inline
+    if (instance.displayMode === 'inline') {
+      instance.isVisible = true
+      this.emitStateChange(instance)
+      return
+    }
 
+    this.showPopupWindow(instance)
   }
 
   // ---------------------------------------------------------------------------
@@ -2887,11 +3468,12 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       if (!this.isToolbarUiDocumentUrl(loadedUrl)) {
         mainLog.info(`[browser-pane] toolbar did-finish-load ignored id=${instance.id} url=${loadedUrl || 'unknown'}`)
         this.pushToolbarState(instance)
-        return
+      } else {
+        this.markToolbarReady(instance, 'did-finish-load')
+        this.pushToolbarState(instance)
       }
 
-      this.markToolbarReady(instance, 'did-finish-load')
-      this.pushToolbarState(instance)
+      void this.injectThemeCSSForInstance(instance)
     })
 
     toolbarWc.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
@@ -2921,6 +3503,11 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     pageWc.on('dom-ready', () => {
       this.installThemeObserver(instance)
       void this.extractThemeColor(instance)
+      void this.injectThemeCSSForInstance(instance)
+    })
+
+    pageWc.on('did-finish-load', () => {
+      void this.injectThemeCSSForInstance(instance)
     })
 
     pageWc.on('before-input-event', (_event, _input) => {
@@ -2965,6 +3552,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       this.lastNetworkActivityByWebContentsId.set(pageWc.id, Date.now())
       this.emitStateChange(instance)
       void this.pushToolbarState(instance)
+      void this.injectThemeCSSForInstance(instance)
       this.scheduleEarlyThemeExtraction(instance, url)
       this.reapplyAgentControlVisual(instance)
     })
@@ -2981,6 +3569,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       instance.title = normalized.title
       instance.canGoBack = pageWc.canGoBack()
       instance.canGoForward = pageWc.canGoForward()
+      void this.injectThemeCSSForInstance(instance)
 
       void this.maybeHandleEmptyStateLaunch(instance, url).then((handled) => {
         if (handled) {
@@ -3146,6 +3735,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
   private toInfo(instance: BrowserInstance): BrowserInstanceInfo {
     return {
       id: instance.id,
+      workspaceId: instance.workspaceId,
       url: instance.currentUrl,
       title: instance.title,
       favicon: instance.favicon,
@@ -3166,5 +3756,9 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       return
     }
     this.stateChangeCallback?.(this.toInfo(instance))
+  }
+
+  private emitDisplayModeChange(mode: 'popup' | 'inline'): void {
+    this.displayModeChangeCallback?.(mode)
   }
 }

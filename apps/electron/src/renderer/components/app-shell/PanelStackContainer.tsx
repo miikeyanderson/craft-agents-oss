@@ -2,7 +2,8 @@
  * PanelStackContainer
  *
  * Horizontal layout container for ALL panels:
- * Sidebar → Navigator → Content Panel(s) with resize sashes.
+ * Sidebar → Navigator → Content Panel(s) with resize sashes, plus an optional
+ * fixed-width inline browser panel at the far right.
  *
  * Content panels use CSS flex-grow with their proportions as weights:
  * - Each panel gets `flex: <proportion> 1 0px` with `min-width: PANEL_MIN_WIDTH`
@@ -21,11 +22,14 @@ import { useAtomValue } from 'jotai'
 import { motion } from 'motion/react'
 import { cn } from '@/lib/utils'
 import { panelStackAtom, focusedPanelIdAtom } from '@/atoms/panel-stack'
+import { browserDisplayModeAtom, browserInstanceCountAtom } from '@/atoms/browser-pane'
+import { InlineBrowserPanel } from '@/components/browser/InlineBrowserPanel'
 import { PanelSlot } from './PanelSlot'
 import { PanelResizeSash } from './PanelResizeSash'
 import {
   PANEL_GAP,
   PANEL_EDGE_INSET,
+  PANEL_MIN_WIDTH,
   PANEL_STACK_VERTICAL_OVERFLOW,
   RADIUS_EDGE,
   RADIUS_INNER,
@@ -42,6 +46,10 @@ interface PanelStackContainerProps {
   isSidebarAndNavigatorHidden: boolean
   isRightSidebarVisible?: boolean
   isResizing?: boolean
+  activeWorkspaceId?: string | null
+  onAddSessionPanel?: () => void
+  onAddBrowserPanel?: () => void
+  browserInlineWidth?: number
 }
 
 export function PanelStackContainer({
@@ -52,11 +60,18 @@ export function PanelStackContainer({
   isSidebarAndNavigatorHidden,
   isRightSidebarVisible,
   isResizing,
+  activeWorkspaceId,
+  onAddSessionPanel,
+  onAddBrowserPanel,
+  browserInlineWidth = 0,
 }: PanelStackContainerProps) {
   const panelStack = useAtomValue(panelStackAtom)
   const focusedPanelId = useAtomValue(focusedPanelIdAtom)
+  const browserDisplayMode = useAtomValue(browserDisplayModeAtom)
+  const browserInstanceCount = useAtomValue(browserInstanceCountAtom)
 
   const contentPanels = panelStack
+  const isBrowserInline = browserDisplayMode === 'inline' && browserInstanceCount > 0
 
   const scrollRef = useRef<HTMLDivElement>(null)
   const prevCountRef = useRef(contentPanels.length)
@@ -153,7 +168,25 @@ export function PanelStackContainer({
 
         {/* === CONTENT PANELS WITH SASHES === */}
         {contentPanels.length === 0 ? (
-          <div className="flex-1 flex items-center justify-center" />
+          isBrowserInline ? (
+            <InlineBrowserPanel
+              workspaceId={activeWorkspaceId}
+              onAddSessionPanel={onAddSessionPanel}
+              onAddBrowserPanel={onAddBrowserPanel}
+              className="shadow-middle"
+              style={{
+                width: browserInlineWidth,
+                flexShrink: 0,
+                minWidth: PANEL_MIN_WIDTH,
+                borderTopLeftRadius: RADIUS_INNER,
+                borderBottomLeftRadius: !hasNavigator ? RADIUS_EDGE : RADIUS_INNER,
+                borderTopRightRadius: RADIUS_INNER,
+                borderBottomRightRadius: !isRightSidebarVisible ? RADIUS_EDGE : RADIUS_INNER,
+              }}
+            />
+          ) : (
+            <div className="flex-1 flex items-center justify-center" />
+          )
         ) : (
           contentPanels.map((entry, index) => (
             <PanelSlot
@@ -163,7 +196,7 @@ export function PanelStackContainer({
               isFocusedPanel={isMultiPanel ? entry.id === focusedPanelId : true}
               isSidebarAndNavigatorHidden={isSidebarAndNavigatorHidden}
               isAtLeftEdge={index === 0 && isLeftEdge}
-              isAtRightEdge={index === contentPanels.length - 1 && !isRightSidebarVisible}
+              isAtRightEdge={index === contentPanels.length - 1 && !isRightSidebarVisible && !isBrowserInline}
               proportion={entry.proportion}
               sash={index > 0 ? (
                 <PanelResizeSash
@@ -172,7 +205,26 @@ export function PanelStackContainer({
                 />
               ) : undefined}
             />
-          ))
+          )).concat(
+            isBrowserInline ? [
+              <InlineBrowserPanel
+                key="inline-browser-panel"
+                workspaceId={activeWorkspaceId}
+                onAddSessionPanel={onAddSessionPanel}
+                onAddBrowserPanel={onAddBrowserPanel}
+                className="shadow-middle"
+                style={{
+                  width: browserInlineWidth,
+                  flexShrink: 0,
+                  minWidth: PANEL_MIN_WIDTH,
+                  borderTopLeftRadius: RADIUS_INNER,
+                  borderBottomLeftRadius: RADIUS_INNER,
+                  borderTopRightRadius: RADIUS_INNER,
+                  borderBottomRightRadius: !isRightSidebarVisible ? RADIUS_EDGE : RADIUS_INNER,
+                }}
+              />,
+            ] : []
+          )
         )}
       </motion.div>
     </div>

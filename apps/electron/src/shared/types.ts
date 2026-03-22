@@ -104,6 +104,14 @@ export interface BrowserPaneCreateOptions {
   bindToSessionId?: string
 }
 
+export interface BrowserContextMenuItemDescriptor {
+  id?: string
+  label?: string
+  enabled?: boolean
+  type?: 'normal' | 'separator'
+  destructive?: boolean
+}
+
 /**
  * Empty-state launch request from the browser empty-state renderer.
  */
@@ -538,6 +546,13 @@ export interface ElectronAPI {
     create(input?: string | BrowserPaneCreateOptions): Promise<string>
     destroy(id: string): Promise<void>
     list(): Promise<BrowserInstanceInfo[]>
+    updateTheme(themeCSS: string, isDark: boolean, backgroundImage?: string | null): Promise<void>
+    showContextMenu(instanceId: string, items: BrowserContextMenuItemDescriptor[]): Promise<string | null>
+    attachToWindow(id?: string): Promise<void>
+    detachFromWindow(id?: string): Promise<void>
+    setInlineBounds(bounds: { x: number; y: number; width: number; height: number }, id?: string): Promise<void>
+    setRendererOverlayActive(active: boolean, id?: string): Promise<void>
+    getDisplayMode(id?: string): Promise<'popup' | 'inline'>
     navigate(id: string, url: string): Promise<{ url: string; title: string }>
     goBack(id: string): Promise<void>
     goForward(id: string): Promise<void>
@@ -546,6 +561,7 @@ export interface ElectronAPI {
     focus(id: string): Promise<void>
     emptyStateLaunch(payload: BrowserEmptyStateLaunchPayload): Promise<BrowserEmptyStateLaunchResult>
     onStateChanged(callback: (info: BrowserInstanceInfo) => void): () => void
+    onDisplayModeChanged(callback: (mode: 'popup' | 'inline') => void): () => void
     onRemoved(callback: (id: string) => void): () => void
     onInteracted(callback: (id: string) => void): () => void
   }
