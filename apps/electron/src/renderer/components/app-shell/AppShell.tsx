@@ -83,7 +83,7 @@ import { useFocusZone } from "@/hooks/keyboard"
 import { useFocusContext } from "@/context/FocusContext"
 import { getSessionTitle } from "@/utils/session"
 import { useSetAtom } from "jotai"
-import type { Session, Workspace, FileAttachment, PermissionRequest, LoadedSource, LoadedSkill, PermissionMode, SourceFilter, AutomationFilter } from "../../../shared/types"
+import type { Session, Workspace, FileAttachment, PermissionRequest, LoadedSource, LoadedSkill, PermissionMode, SourceFilter, AutomationFilter, BrowserInstanceInfo } from "../../../shared/types"
 import { sessionMetaMapAtom, type SessionMeta } from "@/atoms/sessions"
 import { sourcesAtom } from "@/atoms/sources"
 import { skillsAtom } from "@/atoms/skills"
@@ -138,7 +138,10 @@ import {
   activeBrowserInstanceIdAtom,
   browserDisplayModeAtom,
   browserInstanceCountAtom,
+  browserInstancesAtom,
+  removeBrowserInstanceAtom,
   setBrowserInstancesAtom,
+  updateBrowserInstanceAtom,
 } from "@/atoms/browser-pane"
 
 /**
@@ -585,12 +588,15 @@ function AppShellContent({
   const setBrowserInstances = useSetAtom(setBrowserInstancesAtom)
   const setActiveBrowserInstanceId = useSetAtom(activeBrowserInstanceIdAtom)
   const setBrowserDisplayMode = useSetAtom(browserDisplayModeAtom)
+  const updateBrowserInstance = useSetAtom(updateBrowserInstanceAtom)
+  const removeBrowserInstance = useSetAtom(removeBrowserInstanceAtom)
   const browserDisplayMode = useAtomValue(browserDisplayModeAtom)
   const browserInstanceCount = useAtomValue(browserInstanceCountAtom)
   const panelStack = useAtomValue(panelStackAtom)
   const panelCount = useAtomValue(panelCountAtom)
   const focusedSessionId = useAtomValue(focusedSessionIdAtom)
   const isBrowserInline = browserDisplayMode === 'inline' && browserInstanceCount > 0
+  const removeBrowserReconcileTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // Navigate the focused panel to a session.
   // If the session is already open in another panel, focus that panel instead.
@@ -911,6 +917,82 @@ function AppShellContent({
 
     previousWorkspaceRef.current = activeWorkspaceId
   }, [activeWorkspaceId, setActiveBrowserInstanceId, setBrowserDisplayMode, setBrowserInstances])
+
+  React.useEffect(() => {
+    const browserPaneApi = window.electronAPI?.browserPane
+    if (!browserPaneApi) return
+
+    const getScopedInstances = () => store.get(browserInstancesAtom)
+      .filter((instance) => !activeWorkspaceId || instance.workspaceId === activeWorkspaceId)
+
+    const cleanupState = browserPaneApi.onStateChanged((info: BrowserInstanceInfo) => {
+      if (activeWorkspaceId && info.workspaceId !== activeWorkspaceId) {
+        removeBrowserInstance(info.id)
+        setActiveBrowserInstanceId((prev) => (prev === info.id ? null : prev))
+        return
+      }
+
+      updateBrowserInstance(info)
+      setActiveBrowserInstanceId((prev) => prev ?? info.id)
+    })
+
+    const cleanupRemoved = browserPaneApi.onRemoved((id: string) => {
+      removeBrowserInstance(id)
+      setActiveBrowserInstanceId((prev) => {
+        if (prev !== id) return prev
+        const remaining = getScopedInstances().filter((instance) => instance.id !== id)
+        return remaining[0]?.id ?? null
+      })
+
+      if (removeBrowserReconcileTimerRef.current) {
+        clearTimeout(removeBrowserReconcileTimerRef.current)
+      }
+
+      removeBrowserReconcileTimerRef.current = setTimeout(() => {
+        removeBrowserReconcileTimerRef.current = null
+
+        void browserPaneApi.list()
+          .then((instances) => {
+            const scopedInstances = activeWorkspaceId
+              ? instances.filter((instance) => instance.workspaceId === activeWorkspaceId)
+              : instances
+
+            setBrowserInstances(scopedInstances)
+            setActiveBrowserInstanceId((prev) => {
+              if (!prev) return scopedInstances[0]?.id ?? null
+              return scopedInstances.some((instance) => instance.id === prev)
+                ? prev
+                : (scopedInstances[0]?.id ?? null)
+            })
+          })
+          .catch((error) => {
+            console.warn('[AppShell] Reconcile list failed after browser remove:', error)
+          })
+      }, 75)
+    })
+
+    const cleanupInteracted = browserPaneApi.onInteracted((id: string) => {
+      setActiveBrowserInstanceId(id)
+    })
+
+    return () => {
+      cleanupState()
+      cleanupRemoved()
+      cleanupInteracted()
+
+      if (removeBrowserReconcileTimerRef.current) {
+        clearTimeout(removeBrowserReconcileTimerRef.current)
+        removeBrowserReconcileTimerRef.current = null
+      }
+    }
+  }, [
+    activeWorkspaceId,
+    removeBrowserInstance,
+    setActiveBrowserInstanceId,
+    setBrowserInstances,
+    store,
+    updateBrowserInstance,
+  ])
 
   // Load sources from backend on mount
   React.useEffect(() => {

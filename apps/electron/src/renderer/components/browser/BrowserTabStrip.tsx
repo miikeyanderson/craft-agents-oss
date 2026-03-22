@@ -24,9 +24,7 @@ import {
   browserDisplayModeAtom,
   browserInstancesAtom,
   refreshBrowserDisplayModeAtom,
-  setBrowserInstancesAtom,
   toggleBrowserDisplayModeAtom,
-  updateBrowserInstanceAtom,
   removeBrowserInstanceAtom,
 } from '@/atoms/browser-pane'
 import { BrowserTabBadge } from './BrowserTabBadge'
@@ -54,8 +52,6 @@ export function BrowserTabStrip({
   onOverlayOpenChange,
 }: BrowserTabStripProps) {
   const instances = useAtomValue(browserInstancesAtom)
-  const setInstances = useSetAtom(setBrowserInstancesAtom)
-  const updateInstance = useSetAtom(updateBrowserInstanceAtom)
   const removeInstance = useSetAtom(removeBrowserInstanceAtom)
   const browserDisplayMode = useAtomValue(browserDisplayModeAtom)
   const refreshBrowserDisplayMode = useSetAtom(refreshBrowserDisplayModeAtom)
@@ -67,7 +63,6 @@ export function BrowserTabStrip({
     return scopedInstances.filter((instance) => instance.workspaceId === workspaceId)
   }, [instances, instancesOverride, workspaceId])
   const instancesRef = useRef(effectiveInstances)
-  const removeReconcileTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const orderedInstances = useMemo(() => {
     const items = [...effectiveInstances]
@@ -91,91 +86,6 @@ export function BrowserTabStrip({
   useEffect(() => {
     instancesRef.current = effectiveInstances
   }, [effectiveInstances])
-
-  useEffect(() => {
-    if (instancesOverride) return
-
-    const browserPaneApi = window.electronAPI?.browserPane
-    if (!browserPaneApi) {
-      setInstances([])
-      setActiveInstanceId(null)
-      return
-    }
-
-    browserPaneApi.list()
-      .then((items) => {
-        const scopedItems = workspaceId ? items.filter((item) => item.workspaceId === workspaceId) : items
-        setInstances(scopedItems)
-        if (scopedItems.length === 0) {
-          setActiveInstanceId(null)
-          return
-        }
-        setActiveInstanceId((prev) => prev ?? scopedItems[0].id)
-      })
-      .catch((error) => {
-        console.warn('[BrowserTabStrip] Failed to list browser panes:', error)
-        setInstances([])
-        setActiveInstanceId(null)
-      })
-  }, [instancesOverride, setInstances, setActiveInstanceId, workspaceId])
-
-  useEffect(() => {
-    if (instancesOverride) return
-
-    const browserPaneApi = window.electronAPI?.browserPane
-    if (!browserPaneApi) return
-
-    const cleanupState = browserPaneApi.onStateChanged((info: BrowserInstanceInfo) => {
-      if (workspaceId && info.workspaceId !== workspaceId) {
-        removeInstance(info.id)
-        return
-      }
-      updateInstance(info)
-    })
-
-    const cleanupRemoved = browserPaneApi.onRemoved((id: string) => {
-      removeInstance(id)
-      setActiveInstanceId((prev) => {
-        if (prev !== id) return prev
-        const remaining = instancesRef.current.filter((item) => item.id !== id)
-        return remaining[0]?.id ?? null
-      })
-
-      if (removeReconcileTimerRef.current) {
-        clearTimeout(removeReconcileTimerRef.current)
-      }
-
-      removeReconcileTimerRef.current = setTimeout(() => {
-        removeReconcileTimerRef.current = null
-        void browserPaneApi.list()
-          .then((items) => {
-            const scopedItems = workspaceId ? items.filter((item) => item.workspaceId === workspaceId) : items
-            setInstances(scopedItems)
-            setActiveInstanceId((prev) => {
-              if (!prev) return scopedItems[0]?.id ?? null
-              return scopedItems.some((item) => item.id === prev) ? prev : (scopedItems[0]?.id ?? null)
-            })
-          })
-          .catch((error) => {
-            console.warn('[BrowserTabStrip] Reconcile list failed after remove:', error)
-          })
-      }, 75)
-    })
-
-    const cleanupInteracted = browserPaneApi.onInteracted((id: string) => {
-      setActiveInstanceId(id)
-    })
-
-    return () => {
-      cleanupState()
-      cleanupRemoved()
-      cleanupInteracted()
-      if (removeReconcileTimerRef.current) {
-        clearTimeout(removeReconcileTimerRef.current)
-        removeReconcileTimerRef.current = null
-      }
-    }
-  }, [instancesOverride, removeInstance, setActiveInstanceId, setInstances, updateInstance, workspaceId])
 
   useEffect(() => {
     if (orderedInstances.length === 0) {
