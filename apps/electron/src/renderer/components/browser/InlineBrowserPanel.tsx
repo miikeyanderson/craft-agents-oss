@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, type CSSProperties } from 'react'
 import { useAtomValue, useSetAtom } from 'jotai'
 import * as Icons from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { browserDisplayModeAtom, browserInstanceCountAtom, syncBrowserInlineBoundsAtom } from '@/atoms/browser-pane'
+import { activeBrowserInstanceIdAtom, browserDisplayModeAtom, browserInstanceCountAtom, syncBrowserInlineBoundsAtom } from '@/atoms/browser-pane'
 import { PANEL_MIN_WIDTH } from '@/components/app-shell/panel-constants'
 import {
   DropdownMenu,
@@ -24,6 +24,7 @@ interface InlineBrowserPanelProps {
 export function InlineBrowserPanel({ className, style, workspaceId, onAddSessionPanel, onAddBrowserPanel }: InlineBrowserPanelProps) {
   const browserDisplayMode = useAtomValue(browserDisplayModeAtom)
   const browserInstanceCount = useAtomValue(browserInstanceCountAtom)
+  const activeBrowserInstanceId = useAtomValue(activeBrowserInstanceIdAtom)
   const syncBrowserInlineBounds = useSetAtom(syncBrowserInlineBoundsAtom)
   const placeholderRef = useRef<HTMLDivElement>(null)
   const hasInlineBrowser = browserDisplayMode === 'inline' && browserInstanceCount > 0
@@ -70,11 +71,12 @@ export function InlineBrowserPanel({ className, style, workspaceId, onAddSession
   }, [hasInlineBrowser, syncPlaceholderBounds])
 
   // Re-sync native BrowserView bounds immediately when the panel width changes (during drag resize)
+  // or when the active browser instance changes (tab switch needs valid bounds for attachToWindow)
   // ResizeObserver alone can lag behind rapid style changes
   useEffect(() => {
     if (!hasInlineBrowser) return
     syncPlaceholderBounds()
-  }, [hasInlineBrowser, style?.width, syncPlaceholderBounds])
+  }, [hasInlineBrowser, style?.width, activeBrowserInstanceId, syncPlaceholderBounds])
 
   if (!hasInlineBrowser) {
     return null

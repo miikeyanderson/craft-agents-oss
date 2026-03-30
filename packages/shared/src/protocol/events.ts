@@ -50,7 +50,7 @@ export interface BroadcastEventMap {
 
   // Browser pane events (global)
   [RPC_CHANNELS.browserPane.STATE_CHANGED]: [info: BrowserInstanceInfo]
-  [RPC_CHANNELS.browserPane.DISPLAY_MODE_CHANGED]: [mode: 'popup' | 'inline']
+  [RPC_CHANNELS.browserPane.DISPLAY_MODE_CHANGED]: [payload: { mode: 'popup' | 'inline'; workspaceId?: string }]
   [RPC_CHANNELS.browserPane.REMOVED]: [id: string]
   [RPC_CHANNELS.browserPane.INTERACTED]: [id: string]
 

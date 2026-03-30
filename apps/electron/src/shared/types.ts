@@ -561,7 +561,7 @@ export interface ElectronAPI {
     focus(id: string): Promise<void>
     emptyStateLaunch(payload: BrowserEmptyStateLaunchPayload): Promise<BrowserEmptyStateLaunchResult>
     onStateChanged(callback: (info: BrowserInstanceInfo) => void): () => void
-    onDisplayModeChanged(callback: (mode: 'popup' | 'inline') => void): () => void
+    onDisplayModeChanged(callback: (payload: { mode: 'popup' | 'inline'; workspaceId?: string }) => void): () => void
     onRemoved(callback: (id: string) => void): () => void
     onInteracted(callback: (id: string) => void): () => void
   }

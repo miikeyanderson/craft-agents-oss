@@ -319,7 +319,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
   private instances: Map<string, BrowserInstance> = new Map()
   private destroyingIds: Set<string> = new Set()
   private stateChangeCallback: ((info: BrowserInstanceInfo) => void) | null = null
-  private displayModeChangeCallback: ((mode: 'popup' | 'inline') => void) | null = null
+  private displayModeChangeCallback: ((mode: 'popup' | 'inline', workspaceId?: string) => void) | null = null
   private removedCallback: ((id: string) => void) | null = null
   private interactedCallback: ((id: string) => void) | null = null
   private partitionPermissionsInitialized = false
@@ -353,7 +353,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     this.stateChangeCallback = callback
   }
 
-  onDisplayModeChange(callback: (mode: 'popup' | 'inline') => void): void {
+  onDisplayModeChange(callback: (mode: 'popup' | 'inline', workspaceId?: string) => void): void {
     this.displayModeChangeCallback = callback
   }
 
@@ -967,9 +967,19 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       const hostWindow = this.getInlineHostWindow(instance)
       if (!hostWindow || hostWindow.isDestroyed()) return
       if (hostWindow.isMinimized()) hostWindow.restore()
+
+      // Reattach views if they were detached by hide()
+      if (!instance.inlineHostWindow) {
+        instance.inlineHostWindow = hostWindow
+        this.addBrowserViews(hostWindow, instance)
+        this.layoutAllViews(instance)
+      }
+
       hostWindow.show()
       hostWindow.focus()
       instance.pageView.webContents.focus()
+      instance.isVisible = true
+      this.emitStateChange(instance)
       this.interactedCallback?.(instance.id)
       return
     }
@@ -987,26 +997,12 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       return
     }
 
-    // When inline, focus the main window instead of the popup
-    if (instance.displayMode === 'inline') {
-      const hostWindow = this.getInlineHostWindow(instance)
-      if (hostWindow && !hostWindow.isDestroyed()) {
-        hostWindow.focus()
-      }
-      instance.isVisible = true
-      this.emitStateChange(instance)
-      return
-    }
-
     this.showPopupWindow(instance)
   }
 
   hide(id: string): void {
     const instance = this.instances.get(id)
     if (!instance) return
-
-    const win = instance.window
-    if (win.isDestroyed()) return
 
     // Cancel any deferred show request queued before toolbar was ready.
     if (instance.pendingShowOnReady) {
@@ -1016,7 +1012,17 @@ export class BrowserPaneManager implements IBrowserPaneManager {
 
     this.forceCloseToolbarMenu(instance, 'window-hide')
 
-    win.hide()
+    if (instance.displayMode === 'inline') {
+      const hostWindow = this.getInlineHostWindow(instance)
+      if (hostWindow && !hostWindow.isDestroyed()) {
+        this.removeBrowserViews(hostWindow, instance)
+      }
+      instance.inlineHostWindow = null
+    } else {
+      const win = instance.window
+      if (win.isDestroyed()) return
+      win.hide()
+    }
 
     instance.isVisible = false
     this.emitStateChange(instance)
@@ -2606,6 +2612,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     for (const other of this.instances.values()) {
       if (other.id === instance.id || other.displayMode !== 'inline') continue
       const otherHostWindow = this.getInlineHostWindow(other)
+      if (otherHostWindow !== hostWindow) continue
       if (otherHostWindow && !otherHostWindow.isDestroyed()) {
         this.removeBrowserViews(otherHostWindow, other)
       }
@@ -2647,7 +2654,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     instance.isVisible = true
     this.relayoutInlineInstance(instance)
     this.emitStateChange(instance)
-    this.emitDisplayModeChange(instance.displayMode)
+    this.emitDisplayModeChange(instance.displayMode, instance.workspaceId ?? undefined)
     mainLog.info(`[browser-pane] attached instance to main window id=${instance.id} hostWindowWebContentsId=${hostWindow.webContents.id}`)
   }
 
@@ -2673,17 +2680,24 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     }
 
     this.emitStateChange(instance)
-    this.emitDisplayModeChange(instance.displayMode)
+    this.emitDisplayModeChange(instance.displayMode, instance.workspaceId ?? undefined)
     mainLog.info(`[browser-pane] detached instance from main window id=${instance.id}`)
   }
 
-  hideInstancesForWorkspace(workspaceId: string): void {
+  hideInstancesForWorkspace(workspaceId: string, switchingWindow?: BrowserWindow): void {
     mainLog.info(`[browser-pane] hideInstancesForWorkspace called workspaceId=${workspaceId} totalInstances=${this.instances.size}`)
     for (const instance of this.instances.values()) {
       mainLog.info(`[browser-pane] checking instance id=${instance.id} workspaceId=${instance.workspaceId} displayMode=${instance.displayMode}`)
       if (instance.workspaceId !== workspaceId || instance.displayMode !== 'inline') continue
 
-      const hostWindow = this.getInlineHostWindow(instance)
+      const attachedHostWindow = instance.inlineHostWindow && !instance.inlineHostWindow.isDestroyed()
+        ? instance.inlineHostWindow
+        : null
+      const hostWindow = switchingWindow ? attachedHostWindow : this.getInlineHostWindow(instance)
+
+      // If a switching window was specified, only hide instances attached to that window
+      if (switchingWindow && hostWindow !== switchingWindow) continue
+
       mainLog.info(`[browser-pane] hiding inline instance id=${instance.id} hostWindow=${hostWindow ? 'found' : 'null'} destroyed=${hostWindow?.isDestroyed()}`)
       if (hostWindow && !hostWindow.isDestroyed()) {
         this.removeBrowserViews(hostWindow, instance)
@@ -2705,9 +2719,19 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     for (const instance of this.instances.values()) {
       if (instance.workspaceId !== workspaceId || instance.displayMode !== 'inline') continue
 
-      this.addBrowserViews(hostWindow, instance)
+      const attachedHostWindow = instance.inlineHostWindow && !instance.inlineHostWindow.isDestroyed()
+        ? instance.inlineHostWindow
+        : null
+
+      // Do not steal inline BrowserViews from a different window in the same workspace.
+      if (attachedHostWindow && attachedHostWindow !== hostWindow) continue
+
+      if (!attachedHostWindow) {
+        this.addBrowserViews(hostWindow, instance)
+        instance.inlineHostWindow = hostWindow
+      }
+
       hostWindow.setTopBrowserView(instance.toolbarView)
-      instance.inlineHostWindow = hostWindow
       instance.isVisible = true
       this.relayoutInlineInstance(instance)
       this.emitStateChange(instance)
@@ -2715,7 +2739,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     }
 
     if (restoredInline) {
-      this.emitDisplayModeChange('inline')
+      this.emitDisplayModeChange('inline', workspaceId)
     }
   }
 
@@ -3758,7 +3782,7 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     this.stateChangeCallback?.(this.toInfo(instance))
   }
 
-  private emitDisplayModeChange(mode: 'popup' | 'inline'): void {
-    this.displayModeChangeCallback?.(mode)
+  private emitDisplayModeChange(mode: 'popup' | 'inline', workspaceId?: string): void {
+    this.displayModeChangeCallback?.(mode, workspaceId)
   }
 }

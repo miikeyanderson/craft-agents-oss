@@ -58,8 +58,10 @@ browserDisplayModeAtom.onMount = (setAtom) => {
       console.warn('[browser-pane] Failed to get browser display mode:', error)
     })
 
-  const cleanup = browserPaneApi.onDisplayModeChanged((mode) => {
+  const cleanup = browserPaneApi.onDisplayModeChanged((payload) => {
     if (isMounted) {
+      // Accept both legacy string and new scoped payload format
+      const mode = typeof payload === 'string' ? payload : payload.mode
       setAtom(mode)
     }
   })

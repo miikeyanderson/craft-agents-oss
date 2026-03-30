@@ -119,10 +119,10 @@ export function registerWorkspaceCoreHandlers(server: RpcServer, deps: HandlerDe
       }
 
       // Hide inline browser instances for old workspace, show for new
-      if (oldWorkspaceId && oldWorkspaceId !== workspaceId) {
-        deps.browserPaneManager?.hideInstancesForWorkspace(oldWorkspaceId)
-      }
       const win = windowManager.getWindowByWebContentsId(wcId)
+      if (oldWorkspaceId && oldWorkspaceId !== workspaceId) {
+        deps.browserPaneManager?.hideInstancesForWorkspace(oldWorkspaceId, win)
+      }
       if (win) {
         deps.browserPaneManager?.showInstancesForWorkspace(workspaceId, win)
       }

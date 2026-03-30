@@ -63,7 +63,7 @@ describe('browser pane atoms', () => {
   it('syncs display mode from electron API on mount and subscription updates', async () => {
     const store = createStore()
     const cleanupListener = () => {}
-    let onDisplayModeChanged: (mode: 'popup' | 'inline') => void = () => {}
+    let onDisplayModeChanged: (payload: { mode: 'popup' | 'inline'; workspaceId?: string }) => void = () => {}
 
     globalThis.window = {
       electronAPI: {
@@ -82,7 +82,7 @@ describe('browser pane atoms', () => {
     await Promise.resolve()
     expect(store.get(browserDisplayModeAtom)).toBe('inline')
 
-    onDisplayModeChanged('popup')
+    onDisplayModeChanged({ mode: 'popup' })
     expect(store.get(browserDisplayModeAtom)).toBe('popup')
 
     unsubscribe()

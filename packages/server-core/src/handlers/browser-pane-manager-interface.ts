@@ -189,7 +189,7 @@ export interface IBrowserPaneManager {
   hide(id: string): void
 
   /** Hide all inline browser instances for a workspace (on workspace switch) */
-  hideInstancesForWorkspace(workspaceId: string): void
+  hideInstancesForWorkspace(workspaceId: string, switchingWindow?: unknown): void
 
   /** Re-show inline browser instances for a workspace (on workspace switch) */
   showInstancesForWorkspace(workspaceId: string, hostWindow: unknown): void

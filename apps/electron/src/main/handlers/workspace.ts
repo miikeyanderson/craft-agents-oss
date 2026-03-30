@@ -126,12 +126,12 @@ export function registerWorkspaceCoreHandlers(server: RpcServer, deps: HandlerDe
         }
       }
 
+      const win = windowManager.getWindowByWebContentsId(wcId)
       deps.platform.logger.info(`[browser-pane-switch] oldWorkspaceId=${oldWorkspaceId} newWorkspaceId=${workspaceId} hasBPM=${!!deps.browserPaneManager}`)
       if (oldWorkspaceId && oldWorkspaceId !== workspaceId) {
-        deps.browserPaneManager?.hideInstancesForWorkspace(oldWorkspaceId)
+        deps.browserPaneManager?.hideInstancesForWorkspace(oldWorkspaceId, win)
       }
 
-      const win = windowManager.getWindowByWebContentsId(wcId)
       if (win) {
         deps.browserPaneManager?.showInstancesForWorkspace(workspaceId, win)
       }

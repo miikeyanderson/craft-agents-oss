@@ -299,8 +299,13 @@ export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): v
     pushTyped(server, RPC_CHANNELS.browserPane.STATE_CHANGED, { to: 'all' }, info)
   })
 
-  browserPaneManager.onDisplayModeChange((mode) => {
-    pushTyped(server, RPC_CHANNELS.browserPane.DISPLAY_MODE_CHANGED, { to: 'all' }, mode)
+  browserPaneManager.onDisplayModeChange((mode, workspaceId) => {
+    if (workspaceId) {
+      pushTyped(server, RPC_CHANNELS.browserPane.DISPLAY_MODE_CHANGED, { to: 'workspace', workspaceId }, { mode, workspaceId })
+      return
+    }
+
+    pushTyped(server, RPC_CHANNELS.browserPane.DISPLAY_MODE_CHANGED, { to: 'all' }, { mode, workspaceId })
   })
 
   // Forward browser removals so renderer can immediately drop stale tabs
